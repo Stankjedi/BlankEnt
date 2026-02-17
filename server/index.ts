@@ -1,0 +1,1489 @@
+import express from "express";
+import cors from "cors";
+import path from "path";
+import fs from "node:fs";
+import os from "node:os";
+import { randomUUID, createHash, randomBytes, createCipheriv, createDecipheriv } from "node:crypto";
+import { spawn, execFile, type ChildProcess } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
+import { WebSocketServer, WebSocket } from "ws";
+import { fileURLToPath } from "node:url";
+import type { IncomingMessage } from "node:http";
+
+// ---------------------------------------------------------------------------
+// .env loader (no dotenv dependency)
+// ---------------------------------------------------------------------------
+const __server_dirname = path.dirname(fileURLToPath(import.meta.url));
+const envFilePath = path.resolve(__server_dirname, "..", ".env");
+try {
+  if (fs.existsSync(envFilePath)) {
+    const envContent = fs.readFileSync(envFilePath, "utf8");
+    for (const line of envContent.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const eqIdx = trimmed.indexOf("=");
+      if (eqIdx === -1) continue;
+      const key = trimmed.slice(0, eqIdx).trim();
+      const value = trimmed.slice(eqIdx + 1).trim();
+      if (!(key in process.env)) {
+        process.env[key] = value;
+      }
+    }
+  }
+} catch { /* ignore .env read errors */ }
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+const PKG_VERSION: string = (() => {
+  try {
+    return JSON.parse(
+      fs.readFileSync(path.resolve(__server_dirname, "..", "package.json"), "utf8"),
+    ).version ?? "1.0.0";
+  } catch {
+    return "1.0.0";
+  }
+})();
+
+const PORT = Number(process.env.PORT ?? 8787);
+const HOST = process.env.HOST ?? "127.0.0.1";
+
+// ---------------------------------------------------------------------------
+// Express setup
+// ---------------------------------------------------------------------------
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: "2mb" }));
+
+// ---------------------------------------------------------------------------
+// OAuth encryption helpers
+// ---------------------------------------------------------------------------
+const OAUTH_ENCRYPTION_SECRET =
+  process.env.OAUTH_ENCRYPTION_SECRET || process.env.SESSION_SECRET || "";
+
+function oauthEncryptionKey(): Buffer {
+  if (!OAUTH_ENCRYPTION_SECRET) {
+    throw new Error("Missing OAUTH_ENCRYPTION_SECRET");
+  }
+  return createHash("sha256").update(OAUTH_ENCRYPTION_SECRET, "utf8").digest();
+}
+
+function encryptSecret(plaintext: string): string {
+  const key = oauthEncryptionKey();
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const enc = Buffer.concat([cipher.update(Buffer.from(plaintext, "utf8")), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return ["v1", iv.toString("base64"), tag.toString("base64"), enc.toString("base64")].join(":");
+}
+
+function decryptSecret(payload: string): string {
+  const [ver, ivB64, tagB64, ctB64] = payload.split(":");
+  if (ver !== "v1" || !ivB64 || !tagB64 || !ctB64) throw new Error("invalid_encrypted_payload");
+  const key = oauthEncryptionKey();
+  const iv = Buffer.from(ivB64, "base64");
+  const tag = Buffer.from(tagB64, "base64");
+  const ct = Buffer.from(ctB64, "base64");
+  const decipher = createDecipheriv("aes-256-gcm", key, iv);
+  decipher.setAuthTag(tag);
+  const dec = Buffer.concat([decipher.update(ct), decipher.final()]);
+  return dec.toString("utf8");
+}
+
+// ---------------------------------------------------------------------------
+// Production static file serving
+// ---------------------------------------------------------------------------
+const distDir = path.resolve(__server_dirname, "..", "dist");
+const isProduction = !process.env.VITE_DEV && fs.existsSync(path.join(distDir, "index.html"));
+
+// ---------------------------------------------------------------------------
+// Database setup
+// ---------------------------------------------------------------------------
+const dbPath = process.env.DB_PATH ?? path.join(process.cwd(), "climpire.sqlite");
+const db = new DatabaseSync(dbPath);
+
+const logsDir = process.env.LOGS_DIR ?? path.join(process.cwd(), "logs");
+try {
+  fs.mkdirSync(logsDir, { recursive: true });
+} catch { /* ignore */ }
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+function nowMs(): number {
+  return Date.now();
+}
+
+function firstQueryValue(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    const first = value.find((item) => typeof item === "string");
+    return typeof first === "string" ? first : undefined;
+  }
+  return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Schema creation
+// ---------------------------------------------------------------------------
+db.exec(`
+CREATE TABLE IF NOT EXISTS departments (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  name_ko TEXT NOT NULL,
+  icon TEXT NOT NULL,
+  color TEXT NOT NULL,
+  description TEXT,
+  created_at INTEGER DEFAULT (unixepoch()*1000)
+);
+
+CREATE TABLE IF NOT EXISTS agents (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  name_ko TEXT NOT NULL,
+  department_id TEXT REFERENCES departments(id),
+  role TEXT NOT NULL CHECK(role IN ('team_leader','senior','junior','intern')),
+  cli_provider TEXT CHECK(cli_provider IN ('claude','codex','gemini','opencode','copilot','antigravity')),
+  avatar_emoji TEXT NOT NULL DEFAULT '🤖',
+  personality TEXT,
+  status TEXT NOT NULL DEFAULT 'idle' CHECK(status IN ('idle','working','break','offline')),
+  current_task_id TEXT,
+  stats_tasks_done INTEGER DEFAULT 0,
+  stats_xp INTEGER DEFAULT 0,
+  created_at INTEGER DEFAULT (unixepoch()*1000)
+);
+
+CREATE TABLE IF NOT EXISTS tasks (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  description TEXT,
+  department_id TEXT REFERENCES departments(id),
+  assigned_agent_id TEXT REFERENCES agents(id),
+  status TEXT NOT NULL DEFAULT 'inbox' CHECK(status IN ('inbox','planned','in_progress','review','done','cancelled')),
+  priority INTEGER DEFAULT 0,
+  task_type TEXT DEFAULT 'general' CHECK(task_type IN ('general','development','design','analysis','presentation','documentation')),
+  project_path TEXT,
+  result TEXT,
+  started_at INTEGER,
+  completed_at INTEGER,
+  created_at INTEGER DEFAULT (unixepoch()*1000),
+  updated_at INTEGER DEFAULT (unixepoch()*1000)
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+  id TEXT PRIMARY KEY,
+  sender_type TEXT NOT NULL CHECK(sender_type IN ('ceo','agent','system')),
+  sender_id TEXT,
+  receiver_type TEXT NOT NULL CHECK(receiver_type IN ('agent','department','all')),
+  receiver_id TEXT,
+  content TEXT NOT NULL,
+  message_type TEXT DEFAULT 'chat' CHECK(message_type IN ('chat','task_assign','announcement','report','status_update')),
+  task_id TEXT REFERENCES tasks(id),
+  created_at INTEGER DEFAULT (unixepoch()*1000)
+);
+
+CREATE TABLE IF NOT EXISTS task_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT REFERENCES tasks(id),
+  kind TEXT NOT NULL,
+  message TEXT NOT NULL,
+  created_at INTEGER DEFAULT (unixepoch()*1000)
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS oauth_credentials (
+  provider TEXT PRIMARY KEY,
+  source TEXT,
+  encrypted_data TEXT NOT NULL,
+  email TEXT,
+  scope TEXT,
+  expires_at INTEGER,
+  created_at INTEGER DEFAULT (unixepoch()*1000),
+  updated_at INTEGER DEFAULT (unixepoch()*1000)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tasks_agent ON tasks(assigned_agent_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_dept ON tasks(department_id);
+CREATE INDEX IF NOT EXISTS idx_task_logs_task ON task_logs(task_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_receiver ON messages(receiver_type, receiver_id, created_at DESC);
+`);
+
+// ---------------------------------------------------------------------------
+// Seed default data
+// ---------------------------------------------------------------------------
+const deptCount = (db.prepare("SELECT COUNT(*) as cnt FROM departments").get() as { cnt: number }).cnt;
+
+if (deptCount === 0) {
+  const insertDept = db.prepare(
+    "INSERT INTO departments (id, name, name_ko, icon, color) VALUES (?, ?, ?, ?, ?)"
+  );
+  insertDept.run("dev", "Development", "개발팀", "💻", "#3b82f6");
+  insertDept.run("design", "Design", "디자인팀", "🎨", "#8b5cf6");
+  insertDept.run("planning", "Planning", "기획팀", "📊", "#f59e0b");
+  insertDept.run("operations", "Operations", "운영팀", "⚙️", "#10b981");
+  console.log("[CLImpire] Seeded default departments");
+}
+
+const agentCount = (db.prepare("SELECT COUNT(*) as cnt FROM agents").get() as { cnt: number }).cnt;
+
+if (agentCount === 0) {
+  const insertAgent = db.prepare(
+    `INSERT INTO agents (id, name, name_ko, department_id, role, cli_provider, avatar_emoji, personality)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  insertAgent.run(randomUUID(), "Aria",  "아리아", "dev",        "team_leader", "claude",   "👩‍💻", "꼼꼼한 시니어 개발자");
+  insertAgent.run(randomUUID(), "Bolt",  "볼트",   "dev",        "senior",      "codex",    "⚡",   "빠른 코딩 전문가");
+  insertAgent.run(randomUUID(), "Nova",  "노바",   "dev",        "junior",      "gemini",   "🌟",   "창의적인 주니어");
+  insertAgent.run(randomUUID(), "Pixel", "픽셀",   "design",     "team_leader", "claude",   "🎨",   "디자인 리더");
+  insertAgent.run(randomUUID(), "Sage",  "세이지", "planning",   "team_leader", "opencode", "🧠",   "전략 분석가");
+  insertAgent.run(randomUUID(), "Atlas", "아틀라스","operations", "team_leader", "claude",   "🗺️",  "운영의 달인");
+  console.log("[CLImpire] Seeded default agents");
+}
+
+// ---------------------------------------------------------------------------
+// Track active child processes
+// ---------------------------------------------------------------------------
+const activeProcesses = new Map<string, ChildProcess>();
+
+// ---------------------------------------------------------------------------
+// WebSocket setup
+// ---------------------------------------------------------------------------
+const wsClients = new Set<WebSocket>();
+
+function broadcast(type: string, payload: unknown): void {
+  const message = JSON.stringify({ type, payload, ts: nowMs() });
+  for (const ws of wsClients) {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(message);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CLI spawn helpers (ported from claw-kanban)
+// ---------------------------------------------------------------------------
+function buildAgentArgs(provider: string): string[] {
+  switch (provider) {
+    case "codex":
+      return ["codex", "--yolo", "exec", "--json"];
+    case "claude":
+      return [
+        "claude",
+        "--dangerously-skip-permissions",
+        "--print",
+        "--verbose",
+        "--output-format=stream-json",
+        "--include-partial-messages",
+      ];
+    case "gemini":
+      return ["gemini", "--yolo", "--output-format=stream-json"];
+    case "opencode":
+      return ["opencode", "run", "--format", "json"];
+    case "copilot":
+    case "antigravity":
+      throw new Error(`${provider} uses HTTP agent (not CLI spawn)`);
+    default:
+      throw new Error(`unsupported CLI provider: ${provider}`);
+  }
+}
+
+function spawnCliAgent(
+  taskId: string,
+  provider: string,
+  prompt: string,
+  projectPath: string,
+  logPath: string,
+): ChildProcess {
+  // Save prompt for debugging
+  const promptPath = path.join(logsDir, `${taskId}.prompt.txt`);
+  fs.writeFileSync(promptPath, prompt, "utf8");
+
+  const args = buildAgentArgs(provider);
+  const logStream = fs.createWriteStream(logPath, { flags: "w" });
+
+  const child = spawn(args[0], args.slice(1), {
+    cwd: projectPath,
+    shell: process.platform === "win32",
+    stdio: ["pipe", "pipe", "pipe"],
+    detached: process.platform !== "win32",
+    windowsHide: true,
+  });
+
+  activeProcesses.set(taskId, child);
+
+  child.on("error", (err) => {
+    console.error(`[CLImpire] spawn error for ${provider} (task ${taskId}): ${err.message}`);
+    logStream.write(`\n[CLImpire] SPAWN ERROR: ${err.message}\n`);
+    logStream.end();
+    activeProcesses.delete(taskId);
+    appendTaskLog(taskId, "error", `Agent spawn failed: ${err.message}`);
+  });
+
+  // Deliver prompt via stdin (cross-platform safe)
+  child.stdin?.write(prompt);
+  child.stdin?.end();
+
+  // Pipe agent output to log file AND broadcast via WebSocket
+  child.stdout?.on("data", (chunk: Buffer) => {
+    logStream.write(chunk);
+    broadcast("cli_output", { task_id: taskId, stream: "stdout", data: chunk.toString("utf8") });
+  });
+  child.stderr?.on("data", (chunk: Buffer) => {
+    logStream.write(chunk);
+    broadcast("cli_output", { task_id: taskId, stream: "stderr", data: chunk.toString("utf8") });
+  });
+
+  child.on("close", () => {
+    logStream.end();
+    try { fs.unlinkSync(promptPath); } catch { /* ignore */ }
+  });
+
+  if (process.platform !== "win32") child.unref();
+
+  return child;
+}
+
+function killPidTree(pid: number): void {
+  if (process.platform === "win32") {
+    try {
+      execFile("taskkill", ["/pid", String(pid), "/T", "/F"], { timeout: 5000 }, () => {});
+    } catch { /* ignore */ }
+  } else {
+    try { process.kill(-pid, "SIGTERM"); } catch { /* ignore */ }
+    try { process.kill(pid, "SIGTERM"); } catch { /* ignore */ }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Task log helpers
+// ---------------------------------------------------------------------------
+function appendTaskLog(taskId: string, kind: string, message: string): void {
+  const t = nowMs();
+  db.prepare(
+    "INSERT INTO task_logs (task_id, kind, message, created_at) VALUES (?, ?, ?, ?)"
+  ).run(taskId, kind, message, t);
+}
+
+// ---------------------------------------------------------------------------
+// CLI Detection (ported from claw-kanban)
+// ---------------------------------------------------------------------------
+interface CliToolStatus {
+  installed: boolean;
+  version: string | null;
+  authenticated: boolean;
+  authHint: string;
+}
+
+type CliStatusResult = Record<string, CliToolStatus>;
+
+let cachedCliStatus: { data: CliStatusResult; loadedAt: number } | null = null;
+const CLI_STATUS_TTL = 30_000;
+
+interface CliToolDef {
+  name: string;
+  authHint: string;
+  checkAuth: () => boolean;
+}
+
+function jsonHasKey(filePath: string, key: string): boolean {
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    const j = JSON.parse(raw);
+    return j != null && typeof j === "object" && key in j && j[key] != null;
+  } catch {
+    return false;
+  }
+}
+
+function fileExistsNonEmpty(filePath: string): boolean {
+  try {
+    const stat = fs.statSync(filePath);
+    return stat.isFile() && stat.size > 2;
+  } catch {
+    return false;
+  }
+}
+
+const CLI_TOOLS: CliToolDef[] = [
+  {
+    name: "claude",
+    authHint: "Run: claude login",
+    checkAuth: () => {
+      const home = os.homedir();
+      if (jsonHasKey(path.join(home, ".claude.json"), "oauthAccount")) return true;
+      return fileExistsNonEmpty(path.join(home, ".claude", "auth.json"));
+    },
+  },
+  {
+    name: "codex",
+    authHint: "Run: codex auth login",
+    checkAuth: () => {
+      const authPath = path.join(os.homedir(), ".codex", "auth.json");
+      if (jsonHasKey(authPath, "OPENAI_API_KEY") || jsonHasKey(authPath, "tokens")) return true;
+      if (process.env.OPENAI_API_KEY) return true;
+      return false;
+    },
+  },
+  {
+    name: "gemini",
+    authHint: "Run: gemini auth login",
+    checkAuth: () => {
+      if (jsonHasKey(path.join(os.homedir(), ".gemini", "oauth_creds.json"), "access_token")) return true;
+      const appData = process.env.APPDATA;
+      if (appData && jsonHasKey(path.join(appData, "gcloud", "application_default_credentials.json"), "client_id")) return true;
+      return false;
+    },
+  },
+  {
+    name: "opencode",
+    authHint: "Run: opencode auth",
+    checkAuth: () => {
+      const home = os.homedir();
+      if (fileExistsNonEmpty(path.join(home, ".local", "share", "opencode", "auth.json"))) return true;
+      const xdgData = process.env.XDG_DATA_HOME;
+      if (xdgData && fileExistsNonEmpty(path.join(xdgData, "opencode", "auth.json"))) return true;
+      if (process.platform === "darwin") {
+        if (fileExistsNonEmpty(path.join(home, "Library", "Application Support", "opencode", "auth.json"))) return true;
+      }
+      return false;
+    },
+  },
+];
+
+function execWithTimeout(cmd: string, args: string[], timeoutMs: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = execFile(cmd, args, { timeout: timeoutMs }, (err, stdout) => {
+      if (err) return reject(err);
+      resolve(stdout.trim());
+    });
+    child.unref?.();
+  });
+}
+
+async function detectCliTool(tool: CliToolDef): Promise<CliToolStatus> {
+  const whichCmd = process.platform === "win32" ? "where" : "which";
+  try {
+    await execWithTimeout(whichCmd, [tool.name], 3000);
+  } catch {
+    return { installed: false, version: null, authenticated: false, authHint: tool.authHint };
+  }
+
+  let version: string | null = null;
+  try {
+    version = await execWithTimeout(tool.name, ["--version"], 3000);
+    if (version.includes("\n")) version = version.split("\n")[0].trim();
+  } catch { /* binary found but --version failed */ }
+
+  const authenticated = tool.checkAuth();
+  return { installed: true, version, authenticated, authHint: tool.authHint };
+}
+
+async function detectAllCli(): Promise<CliStatusResult> {
+  const results = await Promise.all(CLI_TOOLS.map((t) => detectCliTool(t)));
+  const out: CliStatusResult = {};
+  for (let i = 0; i < CLI_TOOLS.length; i++) {
+    out[CLI_TOOLS[i].name] = results[i];
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Run completion handler
+// ---------------------------------------------------------------------------
+function handleTaskRunComplete(taskId: string, exitCode: number): void {
+  activeProcesses.delete(taskId);
+
+  const t = nowMs();
+  const status = exitCode === 0 ? "done" : "inbox";
+  const logKind = exitCode === 0 ? "completed" : "failed";
+
+  appendTaskLog(taskId, "system", `RUN ${logKind} (exit code: ${exitCode})`);
+
+  // Update task
+  const task = db.prepare("SELECT * FROM tasks WHERE id = ?").get(taskId) as {
+    assigned_agent_id: string | null;
+    title: string;
+  } | undefined;
+
+  db.prepare(
+    "UPDATE tasks SET status = ?, updated_at = ?, completed_at = ? WHERE id = ?"
+  ).run(status, t, exitCode === 0 ? t : null, taskId);
+
+  // Update agent status back to idle
+  if (task?.assigned_agent_id) {
+    db.prepare(
+      "UPDATE agents SET status = 'idle', current_task_id = NULL WHERE id = ?"
+    ).run(task.assigned_agent_id);
+
+    if (exitCode === 0) {
+      db.prepare(
+        "UPDATE agents SET stats_tasks_done = stats_tasks_done + 1, stats_xp = stats_xp + 10 WHERE id = ?"
+      ).run(task.assigned_agent_id);
+    }
+
+    const agent = db.prepare("SELECT * FROM agents WHERE id = ?").get(task.assigned_agent_id) as Record<string, unknown> | undefined;
+    broadcast("agent_status", agent);
+  }
+
+  // Read log file for result
+  const logPath = path.join(logsDir, `${taskId}.log`);
+  let result: string | null = null;
+  try {
+    if (fs.existsSync(logPath)) {
+      const raw = fs.readFileSync(logPath, "utf8");
+      result = raw.slice(-2000); // last 2000 chars as result summary
+    }
+  } catch { /* ignore */ }
+
+  if (result) {
+    db.prepare("UPDATE tasks SET result = ? WHERE id = ?").run(result, taskId);
+  }
+
+  const updatedTask = db.prepare("SELECT * FROM tasks WHERE id = ?").get(taskId);
+  broadcast("task_update", updatedTask);
+
+  // Create system message about completion
+  if (task) {
+    const msgId = randomUUID();
+    db.prepare(
+      `INSERT INTO messages (id, sender_type, sender_id, receiver_type, receiver_id, content, message_type, task_id, created_at)
+       VALUES (?, 'system', NULL, 'all', NULL, ?, 'status_update', ?, ?)`
+    ).run(
+      msgId,
+      exitCode === 0
+        ? `Task "${task.title}" completed successfully.`
+        : `Task "${task.title}" failed (exit code: ${exitCode}).`,
+      taskId,
+      t,
+    );
+    broadcast("new_message", {
+      id: msgId,
+      sender_type: "system",
+      content: exitCode === 0
+        ? `Task "${task.title}" completed successfully.`
+        : `Task "${task.title}" failed (exit code: ${exitCode}).`,
+      message_type: "status_update",
+      task_id: taskId,
+      created_at: t,
+    });
+  }
+}
+
+// ===========================================================================
+// API ENDPOINTS
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Health
+// ---------------------------------------------------------------------------
+const buildHealthPayload = () => ({
+  ok: true,
+  version: PKG_VERSION,
+  app: "CLImpire",
+  dbPath,
+});
+
+app.get("/health", (_req, res) => res.json(buildHealthPayload()));
+app.get("/healthz", (_req, res) => res.json(buildHealthPayload()));
+app.get("/api/health", (_req, res) => res.json(buildHealthPayload()));
+
+// ---------------------------------------------------------------------------
+// Departments
+// ---------------------------------------------------------------------------
+app.get("/api/departments", (_req, res) => {
+  const departments = db.prepare(`
+    SELECT d.*,
+      (SELECT COUNT(*) FROM agents a WHERE a.department_id = d.id) AS agent_count
+    FROM departments d
+    ORDER BY d.created_at ASC
+  `).all();
+  res.json({ departments });
+});
+
+app.get("/api/departments/:id", (req, res) => {
+  const id = String(req.params.id);
+  const department = db.prepare("SELECT * FROM departments WHERE id = ?").get(id);
+  if (!department) return res.status(404).json({ error: "not_found" });
+
+  const agents = db.prepare("SELECT * FROM agents WHERE department_id = ? ORDER BY role, name").all(id);
+  res.json({ department, agents });
+});
+
+// ---------------------------------------------------------------------------
+// Agents
+// ---------------------------------------------------------------------------
+app.get("/api/agents", (_req, res) => {
+  const agents = db.prepare(`
+    SELECT a.*, d.name AS department_name, d.name_ko AS department_name_ko, d.color AS department_color
+    FROM agents a
+    LEFT JOIN departments d ON a.department_id = d.id
+    ORDER BY a.department_id, a.role, a.name
+  `).all();
+  res.json({ agents });
+});
+
+app.get("/api/agents/:id", (req, res) => {
+  const id = String(req.params.id);
+  const agent = db.prepare(`
+    SELECT a.*, d.name AS department_name, d.name_ko AS department_name_ko, d.color AS department_color
+    FROM agents a
+    LEFT JOIN departments d ON a.department_id = d.id
+    WHERE a.id = ?
+  `).get(id);
+  if (!agent) return res.status(404).json({ error: "not_found" });
+
+  // Include recent tasks
+  const recentTasks = db.prepare(
+    "SELECT * FROM tasks WHERE assigned_agent_id = ? ORDER BY updated_at DESC LIMIT 10"
+  ).all(id);
+
+  res.json({ agent, recent_tasks: recentTasks });
+});
+
+app.patch("/api/agents/:id", (req, res) => {
+  const id = String(req.params.id);
+  const existing = db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+  if (!existing) return res.status(404).json({ error: "not_found" });
+
+  const body = req.body ?? {};
+  const allowedFields = [
+    "name", "name_ko", "department_id", "role", "cli_provider",
+    "avatar_emoji", "personality", "status", "current_task_id",
+  ];
+
+  const updates: string[] = [];
+  const params: unknown[] = [];
+
+  for (const field of allowedFields) {
+    if (field in body) {
+      updates.push(`${field} = ?`);
+      params.push(body[field]);
+    }
+  }
+
+  if (updates.length === 0) {
+    return res.status(400).json({ error: "no_fields_to_update" });
+  }
+
+  params.push(id);
+  db.prepare(`UPDATE agents SET ${updates.join(", ")} WHERE id = ?`).run(...params);
+
+  const updated = db.prepare("SELECT * FROM agents WHERE id = ?").get(id);
+  broadcast("agent_status", updated);
+  res.json({ ok: true, agent: updated });
+});
+
+app.post("/api/agents/:id/spawn", (req, res) => {
+  const id = String(req.params.id);
+  const agent = db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as {
+    id: string;
+    name: string;
+    cli_provider: string | null;
+    current_task_id: string | null;
+    status: string;
+  } | undefined;
+  if (!agent) return res.status(404).json({ error: "not_found" });
+
+  const provider = agent.cli_provider || "claude";
+  if (!["claude", "codex", "gemini", "opencode"].includes(provider)) {
+    return res.status(400).json({ error: "unsupported_provider", provider });
+  }
+
+  const taskId = agent.current_task_id;
+  if (!taskId) {
+    return res.status(400).json({ error: "no_task_assigned", message: "Assign a task to this agent first." });
+  }
+
+  const task = db.prepare("SELECT * FROM tasks WHERE id = ?").get(taskId) as {
+    id: string;
+    title: string;
+    description: string | null;
+    project_path: string | null;
+  } | undefined;
+  if (!task) {
+    return res.status(400).json({ error: "task_not_found" });
+  }
+
+  const projectPath = task.project_path || process.cwd();
+  const logPath = path.join(logsDir, `${taskId}.log`);
+
+  const prompt = `${task.title}\n\n${task.description || ""}`;
+
+  appendTaskLog(taskId, "system", `RUN start (agent=${agent.name}, provider=${provider})`);
+
+  const child = spawnCliAgent(taskId, provider, prompt, projectPath, logPath);
+
+  child.on("close", (code) => {
+    handleTaskRunComplete(taskId, code ?? 1);
+  });
+
+  // Update agent status
+  db.prepare("UPDATE agents SET status = 'working' WHERE id = ?").run(id);
+  db.prepare("UPDATE tasks SET status = 'in_progress', started_at = ?, updated_at = ? WHERE id = ?")
+    .run(nowMs(), nowMs(), taskId);
+
+  const updatedAgent = db.prepare("SELECT * FROM agents WHERE id = ?").get(id);
+  broadcast("agent_status", updatedAgent);
+  broadcast("task_update", db.prepare("SELECT * FROM tasks WHERE id = ?").get(taskId));
+
+  res.json({ ok: true, pid: child.pid ?? null, logPath, cwd: projectPath });
+});
+
+// ---------------------------------------------------------------------------
+// Tasks
+// ---------------------------------------------------------------------------
+app.get("/api/tasks", (req, res) => {
+  const statusFilter = firstQueryValue(req.query.status);
+  const deptFilter = firstQueryValue(req.query.department_id);
+  const agentFilter = firstQueryValue(req.query.agent_id);
+
+  const conditions: string[] = [];
+  const params: unknown[] = [];
+
+  if (statusFilter) {
+    conditions.push("t.status = ?");
+    params.push(statusFilter);
+  }
+  if (deptFilter) {
+    conditions.push("t.department_id = ?");
+    params.push(deptFilter);
+  }
+  if (agentFilter) {
+    conditions.push("t.assigned_agent_id = ?");
+    params.push(agentFilter);
+  }
+
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+
+  const tasks = db.prepare(`
+    SELECT t.*,
+      a.name AS agent_name,
+      a.avatar_emoji AS agent_avatar,
+      d.name AS department_name,
+      d.icon AS department_icon
+    FROM tasks t
+    LEFT JOIN agents a ON t.assigned_agent_id = a.id
+    LEFT JOIN departments d ON t.department_id = d.id
+    ${where}
+    ORDER BY t.priority DESC, t.updated_at DESC
+  `).all(...params);
+
+  res.json({ tasks });
+});
+
+app.post("/api/tasks", (req, res) => {
+  const body = req.body ?? {};
+  const id = randomUUID();
+  const t = nowMs();
+
+  const title = body.title;
+  if (!title || typeof title !== "string") {
+    return res.status(400).json({ error: "title_required" });
+  }
+
+  db.prepare(`
+    INSERT INTO tasks (id, title, description, department_id, assigned_agent_id, status, priority, task_type, project_path, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    title,
+    body.description ?? null,
+    body.department_id ?? null,
+    body.assigned_agent_id ?? null,
+    body.status ?? "inbox",
+    body.priority ?? 0,
+    body.task_type ?? "general",
+    body.project_path ?? null,
+    t,
+    t,
+  );
+
+  appendTaskLog(id, "system", `Task created: ${title}`);
+
+  const task = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id);
+  broadcast("task_update", task);
+  res.json({ id, task });
+});
+
+app.get("/api/tasks/:id", (req, res) => {
+  const id = String(req.params.id);
+  const task = db.prepare(`
+    SELECT t.*,
+      a.name AS agent_name,
+      a.avatar_emoji AS agent_avatar,
+      a.cli_provider AS agent_provider,
+      d.name AS department_name,
+      d.icon AS department_icon
+    FROM tasks t
+    LEFT JOIN agents a ON t.assigned_agent_id = a.id
+    LEFT JOIN departments d ON t.department_id = d.id
+    WHERE t.id = ?
+  `).get(id);
+  if (!task) return res.status(404).json({ error: "not_found" });
+
+  const logs = db.prepare(
+    "SELECT * FROM task_logs WHERE task_id = ? ORDER BY created_at DESC LIMIT 200"
+  ).all(id);
+
+  res.json({ task, logs });
+});
+
+app.patch("/api/tasks/:id", (req, res) => {
+  const id = String(req.params.id);
+  const existing = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id);
+  if (!existing) return res.status(404).json({ error: "not_found" });
+
+  const body = req.body ?? {};
+  const allowedFields = [
+    "title", "description", "department_id", "assigned_agent_id",
+    "status", "priority", "task_type", "project_path", "result",
+  ];
+
+  const updates: string[] = ["updated_at = ?"];
+  const params: unknown[] = [nowMs()];
+
+  for (const field of allowedFields) {
+    if (field in body) {
+      updates.push(`${field} = ?`);
+      params.push(body[field]);
+    }
+  }
+
+  // Handle completed_at for status changes
+  if (body.status === "done" && !("completed_at" in body)) {
+    updates.push("completed_at = ?");
+    params.push(nowMs());
+  }
+  if (body.status === "in_progress" && !("started_at" in body)) {
+    updates.push("started_at = ?");
+    params.push(nowMs());
+  }
+
+  params.push(id);
+  db.prepare(`UPDATE tasks SET ${updates.join(", ")} WHERE id = ?`).run(...params);
+
+  appendTaskLog(id, "system", `Task updated: ${Object.keys(body).join(", ")}`);
+
+  const updated = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id);
+  broadcast("task_update", updated);
+  res.json({ ok: true, task: updated });
+});
+
+app.delete("/api/tasks/:id", (req, res) => {
+  const id = String(req.params.id);
+  const existing = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as {
+    assigned_agent_id: string | null;
+  } | undefined;
+  if (!existing) return res.status(404).json({ error: "not_found" });
+
+  // Kill any running process
+  const activeChild = activeProcesses.get(id);
+  if (activeChild?.pid) {
+    killPidTree(activeChild.pid);
+    activeProcesses.delete(id);
+  }
+
+  // Reset agent if assigned
+  if (existing.assigned_agent_id) {
+    db.prepare(
+      "UPDATE agents SET status = 'idle', current_task_id = NULL WHERE id = ? AND current_task_id = ?"
+    ).run(existing.assigned_agent_id, id);
+  }
+
+  db.prepare("DELETE FROM task_logs WHERE task_id = ?").run(id);
+  db.prepare("DELETE FROM messages WHERE task_id = ?").run(id);
+  db.prepare("DELETE FROM tasks WHERE id = ?").run(id);
+
+  // Clean up log files
+  for (const suffix of [".log", ".prompt.txt"]) {
+    const filePath = path.join(logsDir, `${id}${suffix}`);
+    try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch { /* ignore */ }
+  }
+
+  broadcast("task_update", { id, deleted: true });
+  res.json({ ok: true });
+});
+
+app.post("/api/tasks/:id/assign", (req, res) => {
+  const id = String(req.params.id);
+  const task = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as {
+    id: string;
+    assigned_agent_id: string | null;
+    title: string;
+  } | undefined;
+  if (!task) return res.status(404).json({ error: "not_found" });
+
+  const agentId = req.body?.agent_id;
+  if (!agentId || typeof agentId !== "string") {
+    return res.status(400).json({ error: "agent_id_required" });
+  }
+
+  const agent = db.prepare("SELECT * FROM agents WHERE id = ?").get(agentId) as {
+    id: string;
+    name: string;
+    department_id: string | null;
+  } | undefined;
+  if (!agent) return res.status(404).json({ error: "agent_not_found" });
+
+  const t = nowMs();
+
+  // Unassign previous agent if different
+  if (task.assigned_agent_id && task.assigned_agent_id !== agentId) {
+    db.prepare(
+      "UPDATE agents SET current_task_id = NULL WHERE id = ? AND current_task_id = ?"
+    ).run(task.assigned_agent_id, id);
+  }
+
+  // Update task
+  db.prepare(
+    "UPDATE tasks SET assigned_agent_id = ?, department_id = COALESCE(department_id, ?), status = CASE WHEN status = 'inbox' THEN 'planned' ELSE status END, updated_at = ? WHERE id = ?"
+  ).run(agentId, agent.department_id, t, id);
+
+  // Update agent
+  db.prepare("UPDATE agents SET current_task_id = ? WHERE id = ?").run(id, agentId);
+
+  appendTaskLog(id, "system", `Assigned to agent: ${agent.name}`);
+
+  // Create assignment message
+  const msgId = randomUUID();
+  db.prepare(
+    `INSERT INTO messages (id, sender_type, sender_id, receiver_type, receiver_id, content, message_type, task_id, created_at)
+     VALUES (?, 'ceo', NULL, 'agent', ?, ?, 'task_assign', ?, ?)`
+  ).run(msgId, agentId, `New task assigned: ${task.title}`, id, t);
+
+  const updatedTask = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id);
+  const updatedAgent = db.prepare("SELECT * FROM agents WHERE id = ?").get(agentId);
+
+  broadcast("task_update", updatedTask);
+  broadcast("agent_status", updatedAgent);
+  broadcast("new_message", {
+    id: msgId,
+    sender_type: "ceo",
+    receiver_type: "agent",
+    receiver_id: agentId,
+    content: `New task assigned: ${task.title}`,
+    message_type: "task_assign",
+    task_id: id,
+    created_at: t,
+  });
+
+  res.json({ ok: true, task: updatedTask, agent: updatedAgent });
+});
+
+app.post("/api/tasks/:id/run", (req, res) => {
+  const id = String(req.params.id);
+  const task = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as {
+    id: string;
+    title: string;
+    description: string | null;
+    assigned_agent_id: string | null;
+    project_path: string | null;
+    status: string;
+  } | undefined;
+  if (!task) return res.status(404).json({ error: "not_found" });
+
+  if (task.status === "in_progress") {
+    return res.status(400).json({ error: "already_running" });
+  }
+
+  // Get the agent (or use provided agent_id)
+  const agentId = task.assigned_agent_id || (req.body?.agent_id as string | undefined);
+  if (!agentId) {
+    return res.status(400).json({ error: "no_agent_assigned", message: "Assign an agent before running." });
+  }
+
+  const agent = db.prepare(`
+    SELECT a.*, d.name AS department_name, d.name_ko AS department_name_ko
+    FROM agents a LEFT JOIN departments d ON a.department_id = d.id
+    WHERE a.id = ?
+  `).get(agentId) as {
+    id: string;
+    name: string;
+    name_ko: string | null;
+    role: string;
+    cli_provider: string | null;
+    personality: string | null;
+    department_name: string | null;
+    department_name_ko: string | null;
+  } | undefined;
+  if (!agent) return res.status(400).json({ error: "agent_not_found" });
+
+  // Guard: agent already working on another task
+  const agentBusy = activeProcesses.has(
+    (db.prepare("SELECT current_task_id FROM agents WHERE id = ? AND status = 'working'").get(agentId) as { current_task_id: string | null } | undefined)?.current_task_id ?? ""
+  );
+  if (agentBusy) {
+    return res.status(400).json({ error: "agent_busy", message: `${agent.name} is already working on another task.` });
+  }
+
+  const provider = agent.cli_provider || "claude";
+  if (!["claude", "codex", "gemini", "opencode"].includes(provider)) {
+    return res.status(400).json({ error: "unsupported_provider", provider });
+  }
+
+  const projectPath = task.project_path || (req.body?.project_path as string | undefined) || process.cwd();
+  const logPath = path.join(logsDir, `${id}.log`);
+
+  // Build rich prompt with agent context
+  const roleLabel = { team_leader: "Team Leader", senior: "Senior", junior: "Junior", intern: "Intern" }[agent.role] || agent.role;
+  const prompt = [
+    `[Task] ${task.title}`,
+    task.description ? `\n${task.description}` : "",
+    `\n---`,
+    `Agent: ${agent.name} (${roleLabel}, ${agent.department_name || "Unassigned"})`,
+    agent.personality ? `Personality: ${agent.personality}` : "",
+    `Please complete the task above thoroughly.`,
+  ].filter(Boolean).join("\n");
+
+  appendTaskLog(id, "system", `RUN start (agent=${agent.name}, provider=${provider})`);
+
+  const child = spawnCliAgent(id, provider, prompt, projectPath, logPath);
+
+  child.on("close", (code) => {
+    handleTaskRunComplete(id, code ?? 1);
+  });
+
+  const t = nowMs();
+
+  // Update task status
+  db.prepare(
+    "UPDATE tasks SET status = 'in_progress', assigned_agent_id = ?, started_at = ?, updated_at = ? WHERE id = ?"
+  ).run(agentId, t, t, id);
+
+  // Update agent status
+  db.prepare("UPDATE agents SET status = 'working', current_task_id = ? WHERE id = ?").run(id, agentId);
+
+  const updatedTask = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id);
+  const updatedAgent = db.prepare("SELECT * FROM agents WHERE id = ?").get(agentId);
+  broadcast("task_update", updatedTask);
+  broadcast("agent_status", updatedAgent);
+
+  res.json({ ok: true, pid: child.pid ?? null, logPath, cwd: projectPath });
+});
+
+app.post("/api/tasks/:id/stop", (req, res) => {
+  const id = String(req.params.id);
+  const task = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as {
+    id: string;
+    assigned_agent_id: string | null;
+  } | undefined;
+  if (!task) return res.status(404).json({ error: "not_found" });
+
+  const activeChild = activeProcesses.get(id);
+  if (!activeChild?.pid) {
+    // No active process; just update status
+    db.prepare("UPDATE tasks SET status = 'cancelled', updated_at = ? WHERE id = ?").run(nowMs(), id);
+    if (task.assigned_agent_id) {
+      db.prepare("UPDATE agents SET status = 'idle', current_task_id = NULL WHERE id = ?").run(task.assigned_agent_id);
+    }
+    return res.json({ ok: true, stopped: false, message: "No active process found." });
+  }
+
+  killPidTree(activeChild.pid);
+  activeProcesses.delete(id);
+
+  appendTaskLog(id, "system", `STOP sent to pid ${activeChild.pid}`);
+
+  const t = nowMs();
+  db.prepare("UPDATE tasks SET status = 'cancelled', updated_at = ? WHERE id = ?").run(t, id);
+
+  if (task.assigned_agent_id) {
+    db.prepare("UPDATE agents SET status = 'idle', current_task_id = NULL WHERE id = ?").run(task.assigned_agent_id);
+    const updatedAgent = db.prepare("SELECT * FROM agents WHERE id = ?").get(task.assigned_agent_id);
+    broadcast("agent_status", updatedAgent);
+  }
+
+  const updatedTask = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id);
+  broadcast("task_update", updatedTask);
+
+  res.json({ ok: true, stopped: true, pid: activeChild.pid });
+});
+
+// ---------------------------------------------------------------------------
+// Messages / Chat
+// ---------------------------------------------------------------------------
+app.get("/api/messages", (req, res) => {
+  const receiverType = firstQueryValue(req.query.receiver_type);
+  const receiverId = firstQueryValue(req.query.receiver_id);
+  const limitRaw = firstQueryValue(req.query.limit);
+  const limit = Math.min(Math.max(Number(limitRaw) || 50, 1), 500);
+
+  const conditions: string[] = [];
+  const params: unknown[] = [];
+
+  if (receiverType) {
+    conditions.push("receiver_type = ?");
+    params.push(receiverType);
+  }
+  if (receiverId) {
+    conditions.push("(receiver_id = ? OR receiver_type = 'all')");
+    params.push(receiverId);
+  }
+
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  params.push(limit);
+
+  const messages = db.prepare(`
+    SELECT m.*,
+      a.name AS sender_name,
+      a.avatar_emoji AS sender_avatar
+    FROM messages m
+    LEFT JOIN agents a ON m.sender_type = 'agent' AND m.sender_id = a.id
+    ${where}
+    ORDER BY m.created_at DESC
+    LIMIT ?
+  `).all(...params);
+
+  res.json({ messages: messages.reverse() }); // return in chronological order
+});
+
+app.post("/api/messages", (req, res) => {
+  const body = req.body ?? {};
+  const id = randomUUID();
+  const t = nowMs();
+
+  const content = body.content;
+  if (!content || typeof content !== "string") {
+    return res.status(400).json({ error: "content_required" });
+  }
+
+  const senderType = body.sender_type || "ceo";
+  const senderId = body.sender_id ?? null;
+  const receiverType = body.receiver_type || "all";
+  const receiverId = body.receiver_id ?? null;
+  const messageType = body.message_type || "chat";
+  const taskId = body.task_id ?? null;
+
+  db.prepare(`
+    INSERT INTO messages (id, sender_type, sender_id, receiver_type, receiver_id, content, message_type, task_id, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, senderType, senderId, receiverType, receiverId, content, messageType, taskId, t);
+
+  const msg = {
+    id,
+    sender_type: senderType,
+    sender_id: senderId,
+    receiver_type: receiverType,
+    receiver_id: receiverId,
+    content,
+    message_type: messageType,
+    task_id: taskId,
+    created_at: t,
+  };
+
+  broadcast("new_message", msg);
+  res.json({ ok: true, message: msg });
+});
+
+app.post("/api/announcements", (req, res) => {
+  const body = req.body ?? {};
+  const content = body.content;
+  if (!content || typeof content !== "string") {
+    return res.status(400).json({ error: "content_required" });
+  }
+
+  const id = randomUUID();
+  const t = nowMs();
+
+  db.prepare(`
+    INSERT INTO messages (id, sender_type, sender_id, receiver_type, receiver_id, content, message_type, created_at)
+    VALUES (?, 'ceo', NULL, 'all', NULL, ?, 'announcement', ?)
+  `).run(id, content, t);
+
+  const msg = {
+    id,
+    sender_type: "ceo",
+    sender_id: null,
+    receiver_type: "all",
+    receiver_id: null,
+    content,
+    message_type: "announcement",
+    created_at: t,
+  };
+
+  broadcast("announcement", msg);
+  res.json({ ok: true, message: msg });
+});
+
+// ---------------------------------------------------------------------------
+// CLI Status
+// ---------------------------------------------------------------------------
+app.get("/api/cli-status", async (_req, res) => {
+  const refresh = _req.query.refresh === "1";
+  const now = Date.now();
+
+  if (!refresh && cachedCliStatus && now - cachedCliStatus.loadedAt < CLI_STATUS_TTL) {
+    return res.json({ providers: cachedCliStatus.data });
+  }
+
+  try {
+    const data = await detectAllCli();
+    cachedCliStatus = { data, loadedAt: Date.now() };
+    res.json({ providers: data });
+  } catch (err) {
+    res.status(500).json({ error: "cli_detection_failed", message: String(err) });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+app.get("/api/settings", (_req, res) => {
+  const rows = db.prepare("SELECT key, value FROM settings").all() as { key: string; value: string }[];
+  const settings: Record<string, unknown> = {};
+  for (const row of rows) {
+    try {
+      settings[row.key] = JSON.parse(row.value);
+    } catch {
+      settings[row.key] = row.value;
+    }
+  }
+  res.json({ settings });
+});
+
+app.put("/api/settings", (req, res) => {
+  const body = req.body ?? {};
+
+  const upsert = db.prepare(
+    "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+  );
+
+  for (const [key, value] of Object.entries(body)) {
+    upsert.run(key, typeof value === "string" ? value : JSON.stringify(value));
+  }
+
+  res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// Stats / Dashboard
+// ---------------------------------------------------------------------------
+app.get("/api/stats", (_req, res) => {
+  const totalTasks = (db.prepare("SELECT COUNT(*) as cnt FROM tasks").get() as { cnt: number }).cnt;
+  const doneTasks = (db.prepare("SELECT COUNT(*) as cnt FROM tasks WHERE status = 'done'").get() as { cnt: number }).cnt;
+  const inProgressTasks = (db.prepare("SELECT COUNT(*) as cnt FROM tasks WHERE status = 'in_progress'").get() as { cnt: number }).cnt;
+  const inboxTasks = (db.prepare("SELECT COUNT(*) as cnt FROM tasks WHERE status = 'inbox'").get() as { cnt: number }).cnt;
+  const plannedTasks = (db.prepare("SELECT COUNT(*) as cnt FROM tasks WHERE status = 'planned'").get() as { cnt: number }).cnt;
+  const reviewTasks = (db.prepare("SELECT COUNT(*) as cnt FROM tasks WHERE status = 'review'").get() as { cnt: number }).cnt;
+  const cancelledTasks = (db.prepare("SELECT COUNT(*) as cnt FROM tasks WHERE status = 'cancelled'").get() as { cnt: number }).cnt;
+
+  const totalAgents = (db.prepare("SELECT COUNT(*) as cnt FROM agents").get() as { cnt: number }).cnt;
+  const workingAgents = (db.prepare("SELECT COUNT(*) as cnt FROM agents WHERE status = 'working'").get() as { cnt: number }).cnt;
+  const idleAgents = (db.prepare("SELECT COUNT(*) as cnt FROM agents WHERE status = 'idle'").get() as { cnt: number }).cnt;
+
+  const completionRate = totalTasks > 0 ? Math.round((doneTasks / totalTasks) * 100) : 0;
+
+  // Top agents by XP
+  const topAgents = db.prepare(
+    "SELECT id, name, avatar_emoji, stats_tasks_done, stats_xp FROM agents ORDER BY stats_xp DESC LIMIT 5"
+  ).all();
+
+  // Tasks per department
+  const tasksByDept = db.prepare(`
+    SELECT d.id, d.name, d.icon, d.color,
+      COUNT(t.id) AS total_tasks,
+      SUM(CASE WHEN t.status = 'done' THEN 1 ELSE 0 END) AS done_tasks
+    FROM departments d
+    LEFT JOIN tasks t ON t.department_id = d.id
+    GROUP BY d.id
+    ORDER BY d.name
+  `).all();
+
+  // Recent activity (last 20 task logs)
+  const recentActivity = db.prepare(`
+    SELECT tl.*, t.title AS task_title
+    FROM task_logs tl
+    LEFT JOIN tasks t ON tl.task_id = t.id
+    ORDER BY tl.created_at DESC
+    LIMIT 20
+  `).all();
+
+  res.json({
+    stats: {
+      tasks: {
+        total: totalTasks,
+        done: doneTasks,
+        in_progress: inProgressTasks,
+        inbox: inboxTasks,
+        planned: plannedTasks,
+        review: reviewTasks,
+        cancelled: cancelledTasks,
+        completion_rate: completionRate,
+      },
+      agents: {
+        total: totalAgents,
+        working: workingAgents,
+        idle: idleAgents,
+      },
+      top_agents: topAgents,
+      tasks_by_department: tasksByDept,
+      recent_activity: recentActivity,
+    },
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task terminal log viewer (ported from claw-kanban)
+// ---------------------------------------------------------------------------
+app.get("/api/tasks/:id/terminal", (req, res) => {
+  const id = String(req.params.id);
+  const lines = Math.min(Math.max(Number(req.query.lines ?? 200), 20), 4000);
+  const filePath = path.join(logsDir, `${id}.log`);
+
+  if (!fs.existsSync(filePath)) {
+    return res.json({ ok: true, exists: false, path: filePath, text: "" });
+  }
+
+  const raw = fs.readFileSync(filePath, "utf8");
+  const parts = raw.split(/\r?\n/);
+  const tail = parts.slice(Math.max(0, parts.length - lines)).join("\n");
+  res.json({ ok: true, exists: true, path: filePath, text: tail });
+});
+
+// ---------------------------------------------------------------------------
+// OAuth credentials (simplified for CLImpire)
+// ---------------------------------------------------------------------------
+app.get("/api/oauth/status", (_req, res) => {
+  const rows = db.prepare(
+    "SELECT provider, source, email, scope, expires_at, created_at, updated_at FROM oauth_credentials"
+  ).all() as Array<{
+    provider: string;
+    source: string | null;
+    email: string | null;
+    scope: string | null;
+    expires_at: number | null;
+    created_at: number;
+    updated_at: number;
+  }>;
+
+  const providers: Record<string, unknown> = {};
+  for (const row of rows) {
+    providers[row.provider] = {
+      connected: true,
+      source: row.source,
+      email: row.email,
+      scope: row.scope,
+      expires_at: row.expires_at,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    };
+  }
+
+  res.json({
+    storageReady: Boolean(OAUTH_ENCRYPTION_SECRET),
+    providers,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Production: serve React UI from dist/
+// ---------------------------------------------------------------------------
+if (isProduction) {
+  app.use(express.static(distDir));
+  // SPA fallback: serve index.html for non-API routes (Express 5 named wildcard)
+  app.get("/{*splat}", (req, res) => {
+    if (req.path.startsWith("/api/") || req.path === "/health" || req.path === "/healthz") {
+      return res.status(404).json({ error: "not_found" });
+    }
+    res.sendFile(path.join(distDir, "index.html"));
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Start HTTP server + WebSocket
+// ---------------------------------------------------------------------------
+const server = app.listen(PORT, HOST, () => {
+  console.log(`[CLImpire] v${PKG_VERSION} listening on http://${HOST}:${PORT} (db: ${dbPath})`);
+  if (isProduction) {
+    console.log(`[CLImpire] mode: production (serving UI from ${distDir})`);
+  } else {
+    console.log(`[CLImpire] mode: development (UI served by Vite on separate port)`);
+  }
+});
+
+// WebSocket server on same HTTP server
+const wss = new WebSocketServer({ server });
+
+wss.on("connection", (ws: WebSocket, _req: IncomingMessage) => {
+  wsClients.add(ws);
+  console.log(`[CLImpire] WebSocket client connected (total: ${wsClients.size})`);
+
+  // Send initial state to the newly connected client
+  ws.send(JSON.stringify({
+    type: "connected",
+    payload: {
+      version: PKG_VERSION,
+      app: "CLImpire",
+    },
+    ts: nowMs(),
+  }));
+
+  ws.on("close", () => {
+    wsClients.delete(ws);
+    console.log(`[CLImpire] WebSocket client disconnected (total: ${wsClients.size})`);
+  });
+
+  ws.on("error", () => {
+    wsClients.delete(ws);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Graceful shutdown
+// ---------------------------------------------------------------------------
+function gracefulShutdown(signal: string): void {
+  console.log(`\n[CLImpire] ${signal} received. Shutting down gracefully...`);
+
+  // Stop all active CLI processes
+  for (const [taskId, child] of activeProcesses) {
+    console.log(`[CLImpire] Stopping process for task ${taskId} (pid: ${child.pid})`);
+    if (child.pid) {
+      killPidTree(child.pid);
+    }
+    activeProcesses.delete(taskId);
+
+    // Reset agent status for running tasks
+    const task = db.prepare("SELECT assigned_agent_id FROM tasks WHERE id = ?").get(taskId) as {
+      assigned_agent_id: string | null;
+    } | undefined;
+    if (task?.assigned_agent_id) {
+      db.prepare("UPDATE agents SET status = 'idle', current_task_id = NULL WHERE id = ?")
+        .run(task.assigned_agent_id);
+    }
+    db.prepare("UPDATE tasks SET status = 'cancelled', updated_at = ? WHERE id = ? AND status = 'in_progress'")
+      .run(nowMs(), taskId);
+  }
+
+  // Close all WebSocket connections
+  for (const ws of wsClients) {
+    ws.close(1001, "Server shutting down");
+  }
+  wsClients.clear();
+
+  // Close WebSocket server
+  wss.close(() => {
+    // Close HTTP server
+    server.close(() => {
+      // Close database
+      try {
+        db.close();
+      } catch { /* ignore */ }
+      console.log("[CLImpire] Shutdown complete.");
+      process.exit(0);
+    });
+  });
+
+  // Force exit after 5 seconds if graceful shutdown hangs
+  setTimeout(() => {
+    console.error("[CLImpire] Forced exit after timeout.");
+    process.exit(1);
+  }, 5000).unref();
+}
+
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
