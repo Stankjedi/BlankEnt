@@ -257,3 +257,16 @@ export async function discardTask(id: string): Promise<{ ok: boolean; message: s
 export async function getWorktrees(): Promise<{ ok: boolean; worktrees: WorktreeEntry[] }> {
   return request<{ ok: boolean; worktrees: WorktreeEntry[] }>('/api/worktrees');
 }
+
+// CLI Usage
+export interface CliUsageEntry {
+  tasksToday: number;
+  tasksActive: number;
+  tasksTotal: number;
+  dailyLimit: number;
+  percentage: number;
+}
+
+export async function getCliUsage(): Promise<{ ok: boolean; usage: Record<string, CliUsageEntry> }> {
+  return request<{ ok: boolean; usage: Record<string, CliUsageEntry> }>('/api/cli-usage');
+}

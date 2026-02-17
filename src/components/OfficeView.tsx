@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback, useState } from "react";
 import {
   Application,
   Container,
@@ -12,6 +12,8 @@ import {
   TextureStyle,
 } from "pixi.js";
 import type { Department, Agent, Task } from "../types";
+import type { CliStatusMap } from "../types";
+import { getCliStatus, getCliUsage, type CliUsageEntry } from "../api";
 
 /* ================================================================== */
 /*  Types                                                              */
@@ -1000,6 +1002,32 @@ export default function OfficeView({
     }
   }, [crossDeptDeliveries, onCrossDeptDeliveryProcessed]);
 
+  // ── CLI Usage Gauges ──
+  const [cliStatus, setCliStatus] = useState<CliStatusMap | null>(null);
+  const [cliUsage, setCliUsage] = useState<Record<string, CliUsageEntry> | null>(null);
+
+  useEffect(() => {
+    getCliStatus().then(setCliStatus).catch(() => {});
+    getCliUsage().then((r) => { if (r.ok) setCliUsage(r.usage); }).catch(() => {});
+    const interval = setInterval(() => {
+      getCliUsage().then((r) => { if (r.ok) setCliUsage(r.usage); }).catch(() => {});
+    }, 30000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const CLI_DISPLAY: Array<{ key: string; name: string; icon: string; color: string; bgColor: string; barColor: string }> = [
+    { key: "claude", name: "Claude", icon: "\u2728", color: "text-violet-300", bgColor: "bg-violet-500/15 border-violet-400/30", barColor: "from-violet-500 to-violet-300" },
+    { key: "codex", name: "Codex", icon: "\u26A1", color: "text-emerald-300", bgColor: "bg-emerald-500/15 border-emerald-400/30", barColor: "from-emerald-500 to-emerald-300" },
+    { key: "gemini", name: "Gemini", icon: "\uD83D\uDC8E", color: "text-blue-300", bgColor: "bg-blue-500/15 border-blue-400/30", barColor: "from-blue-500 to-cyan-300" },
+    { key: "copilot", name: "Copilot", icon: "\uD83D\uDE80", color: "text-amber-300", bgColor: "bg-amber-500/15 border-amber-400/30", barColor: "from-amber-500 to-yellow-300" },
+    { key: "antigravity", name: "Antigravity", icon: "\uD83C\uDF0C", color: "text-pink-300", bgColor: "bg-pink-500/15 border-pink-400/30", barColor: "from-pink-500 to-rose-300" },
+  ];
+
+  const connectedClis = CLI_DISPLAY.filter((c) => {
+    const s = cliStatus?.[c.key as keyof CliStatusMap];
+    return s?.installed && s?.authenticated;
+  });
+
   return (
     <div className="w-full overflow-auto" style={{ minHeight: "100%" }}>
       <div
@@ -1008,6 +1036,67 @@ export default function OfficeView({
         style={{ maxWidth: "100%", lineHeight: 0, outline: "none" }}
         tabIndex={0}
       />
+
+      {/* CLI Usage Gauges */}
+      {connectedClis.length > 0 && (
+        <div className="mx-auto mt-4 max-w-[820px] px-2">
+          <div className="rounded-2xl border border-slate-700/60 bg-slate-900/80 p-4 backdrop-blur-sm">
+            <div className="mb-3 flex items-center justify-between">
+              <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-200">
+                <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-cyan-500/20 text-xs">
+                  {"\u2699\uFE0F"}
+                </span>
+                CLI Usage
+              </h3>
+              <span className="rounded-full bg-slate-800 px-2 py-0.5 text-[10px] text-slate-400">
+                {connectedClis.length} connected
+              </span>
+            </div>
+            <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
+              {connectedClis.map((cli) => {
+                const usage = cliUsage?.[cli.key];
+                const pct = usage?.percentage ?? 0;
+                const remaining = usage ? Math.max(0, usage.dailyLimit - usage.tasksToday) : 0;
+                const barWidth = Math.min(100, pct);
+
+                return (
+                  <div
+                    key={cli.key}
+                    className={`group rounded-xl border ${cli.bgColor} p-3 transition-all duration-300 hover:-translate-y-0.5 hover:shadow-lg`}
+                  >
+                    <div className="mb-2 flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="text-base">{cli.icon}</span>
+                        <span className={`text-sm font-semibold ${cli.color}`}>{cli.name}</span>
+                      </div>
+                      {usage && usage.tasksActive > 0 && (
+                        <span className="flex items-center gap-1 rounded-full bg-green-500/20 px-1.5 py-0.5 text-[10px] text-green-300">
+                          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-green-400" />
+                          {usage.tasksActive}
+                        </span>
+                      )}
+                    </div>
+                    <div className="mb-1.5 h-2.5 overflow-hidden rounded-full bg-slate-700/60">
+                      <div
+                        className={`h-full rounded-full bg-gradient-to-r ${cli.barColor} transition-all duration-700`}
+                        style={{ width: `${barWidth}%` }}
+                      />
+                    </div>
+                    <div className="flex items-center justify-between text-[10px]">
+                      <span className="text-slate-400">
+                        {usage ? `${usage.tasksToday}/${usage.dailyLimit}` : "..."} tasks
+                      </span>
+                      <span className={pct >= 80 ? "font-semibold text-red-400" : pct >= 50 ? "text-amber-400" : "text-slate-400"}>
+                        {usage ? `${remaining} remaining` : "loading..."}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

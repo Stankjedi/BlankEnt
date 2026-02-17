@@ -3436,6 +3436,76 @@ app.get("/api/worktrees", (_req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// CLI Usage stats (per-provider task usage)
+// ---------------------------------------------------------------------------
+app.get("/api/cli-usage", (_req, res) => {
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const todayMs = todayStart.getTime();
+
+  // Tasks completed per provider today
+  const todayRows = db.prepare(`
+    SELECT a.cli_provider AS provider, COUNT(*) AS cnt
+    FROM tasks t
+    JOIN agents a ON t.assigned_agent_id = a.id
+    WHERE t.completed_at >= ? AND t.status = 'done'
+    GROUP BY a.cli_provider
+  `).all(todayMs) as Array<{ provider: string; cnt: number }>;
+
+  // Tasks in progress per provider
+  const activeRows = db.prepare(`
+    SELECT a.cli_provider AS provider, COUNT(*) AS cnt
+    FROM tasks t
+    JOIN agents a ON t.assigned_agent_id = a.id
+    WHERE t.status = 'in_progress'
+    GROUP BY a.cli_provider
+  `).all() as Array<{ provider: string; cnt: number }>;
+
+  // Total tasks per provider (all time)
+  const totalRows = db.prepare(`
+    SELECT a.cli_provider AS provider, COUNT(*) AS cnt
+    FROM tasks t
+    JOIN agents a ON t.assigned_agent_id = a.id
+    WHERE t.status = 'done'
+    GROUP BY a.cli_provider
+  `).all() as Array<{ provider: string; cnt: number }>;
+
+  const providers = ["claude", "codex", "gemini", "copilot", "antigravity"];
+  const usage: Record<string, {
+    tasksToday: number;
+    tasksActive: number;
+    tasksTotal: number;
+    dailyLimit: number;
+    percentage: number;
+  }> = {};
+
+  // Default daily limits per provider (rough estimates; configurable later)
+  const DAILY_LIMITS: Record<string, number> = {
+    claude: 40, codex: 30, gemini: 50, copilot: 40, antigravity: 20,
+  };
+
+  const todayMap = new Map(todayRows.map(r => [r.provider, r.cnt]));
+  const activeMap = new Map(activeRows.map(r => [r.provider, r.cnt]));
+  const totalMap = new Map(totalRows.map(r => [r.provider, r.cnt]));
+
+  for (const p of providers) {
+    const today = todayMap.get(p) ?? 0;
+    const active = activeMap.get(p) ?? 0;
+    const total = totalMap.get(p) ?? 0;
+    const limit = DAILY_LIMITS[p] ?? 30;
+    usage[p] = {
+      tasksToday: today,
+      tasksActive: active,
+      tasksTotal: total,
+      dailyLimit: limit,
+      percentage: Math.min(100, Math.round((today / limit) * 100)),
+    };
+  }
+
+  res.json({ ok: true, usage });
+});
+
+// ---------------------------------------------------------------------------
 // Production: serve React UI from dist/
 // ---------------------------------------------------------------------------
 if (isProduction) {
