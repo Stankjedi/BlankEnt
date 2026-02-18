@@ -40,27 +40,42 @@ Ask in the user's detected language:
 
 **Wait for the user's response before proceeding.**
 
-### Step 3: Send directive to server
+### Step 3: Ask project path/context
 
-Based on the user's choice, use the `skipPlannedMeeting` API parameter:
+After meeting choice is confirmed, ask where to run the work.
+
+Ask in the user's detected language:
+- KO: `작업 기준 프로젝트(경로)가 있을까요?\n예: /Users/me/Projects/climpire\n또는: 기존 작업하던 climpire 프로젝트 / 신규 프로젝트`
+- EN: `Which project path/context should we use?\nExample: /Users/me/Projects/climpire\nOr: existing climpire project / new project`
+- JA: `作業対象のプロジェクト（パス/コンテキスト）はありますか？\n例: /Users/me/Projects/climpire\nまたは: 既存の climpire プロジェクト / 新規プロジェクト`
+- ZH: `本次任务的项目路径/上下文是什么？\n例如: /Users/me/Projects/climpire\n或者: 之前在做的 climpire 项目 / 新项目`
+
+**Wait for the user's response before proceeding.**
+
+### Step 4: Send directive to server
+
+Based on the user's answers:
+- Use `skipPlannedMeeting` from the meeting choice.
+- If the user gave an exact path, include `"project_path":"<path>"`.
+- If the user gave fuzzy context (e.g., "existing climpire project", "new project"), include `"project_context":"<text>"`.
 
 **Option 1 — With meeting (default):**
 ```bash
 curl -X POST http://127.0.0.1:__PORT__/api/inbox \
   -H 'content-type: application/json' \
-  -d '{"source":"telegram","text":"$<message content>","author":"<sender>"}'
+  -d '{"source":"telegram","text":"$<message content>","author":"<sender>","project_path":"<optional path>","project_context":"<optional context>"}'
 ```
 
 **Option 2 — Without meeting:**
 ```bash
 curl -X POST http://127.0.0.1:__PORT__/api/inbox \
   -H 'content-type: application/json' \
-  -d '{"source":"telegram","text":"$<message content>","author":"<sender>","skipPlannedMeeting":true}'
+  -d '{"source":"telegram","text":"$<message content>","author":"<sender>","skipPlannedMeeting":true,"project_path":"<optional path>","project_context":"<optional context>"}'
 ```
 
 **Do NOT modify the directive text.** Use `"skipPlannedMeeting": true` in the JSON body to skip the meeting. The directive message is passed to agents as-is.
 
-### Step 4: Confirm
+### Step 5: Confirm
 
 Reply with **only a short confirmation** in the user's language:
 - KO: `✅ Claw-Empire 업무지시 전달 완료` (회의 진행) / `✅ Claw-Empire 업무지시 전달 완료 (회의 생략)` (회의 없이)
@@ -269,7 +284,7 @@ curl http://127.0.0.1:__PORT__/api/cli-status
 
 When processing `$` or `#` commands, the response to the user must be **minimal and clean**:
 
-1. **`$` directive**: Only `✅ Claw-Empire 업무지시 전달 완료` (or language equivalent). Nothing else.
+1. **`$` directive**: After collecting required meeting/path inputs and sending to API, reply with only `✅ Claw-Empire 업무지시 전달 완료` (or language equivalent). Nothing else.
 2. **`#` task**: Only `✅ 태스크 등록 완료` (or language equivalent). Nothing else.
 3. **NEVER include** in responses:
    - OAuth connection details or token information

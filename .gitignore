@@ -31,5 +31,20 @@ secrets*.json
 docs/reports/
 .climpire-worktrees/
 
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Coverage / test artifacts
+coverage/
+.nyc_output/
+
+# NPM auth
+.npmrc
+
 # OS metadata
 .DS_Store
+Thumbs.db

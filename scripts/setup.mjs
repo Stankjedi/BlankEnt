@@ -44,7 +44,7 @@ function detectPort() {
     if (match) return match[1];
   }
   // 3. Default
-  return "8787";
+  return "8790";
 }
 
 function resolveWorkspaceDir() {

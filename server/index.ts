@@ -2515,7 +2515,7 @@ async function executeCopilotAgent(
     headers: {
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
-      "Editor-Version": "climpire/1.0",
+      "Editor-Version": "climpire/1.0.0",
       "Copilot-Integration-Id": "vscode-chat",
     },
     body: JSON.stringify({
@@ -6038,7 +6038,15 @@ type DirectivePolicy = {
 type DelegationOptions = {
   skipPlannedMeeting?: boolean;
   skipPlanSubtasks?: boolean;
+  projectPath?: string | null;
+  projectContext?: string | null;
 };
+
+function normalizeTextField(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
 
 function analyzeDirectivePolicy(content: string): DirectivePolicy {
   const text = content.trim();
@@ -7012,7 +7020,10 @@ function startCrossDeptCooperation(
       [`[協業] ${taskTitle}`],
       [`[协作] ${taskTitle}`],
     ), lang);
-    const crossDetectedPath = detectProjectPath(ceoMessage);
+    const parentTaskPath = db.prepare("SELECT project_path FROM tasks WHERE id = ?").get(taskId) as {
+      project_path: string | null;
+    } | undefined;
+    const crossDetectedPath = parentTaskPath?.project_path ?? detectProjectPath(ceoMessage);
     db.prepare(`
       INSERT INTO tasks (id, title, description, department_id, status, priority, task_type, project_path, source_task_id, created_at, updated_at)
       VALUES (?, ?, ?, ?, 'planned', 1, 'general', ?, ?, ?, ?)
@@ -7174,6 +7185,72 @@ function resolveProjectPath(task: { project_path?: string | null; description?: 
   // Try to detect from description or title
   const detected = detectProjectPath(task.description || "") || detectProjectPath(task.title || "");
   return detected || process.cwd();
+}
+
+function getLatestKnownProjectPath(): string | null {
+  const row = db.prepare(`
+    SELECT project_path
+    FROM tasks
+    WHERE project_path IS NOT NULL AND TRIM(project_path) != ''
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `).get() as { project_path: string | null } | undefined;
+  const candidate = normalizeTextField(row?.project_path ?? null);
+  if (!candidate) return null;
+  try {
+    if (fs.statSync(candidate).isDirectory()) return candidate;
+  } catch {}
+  return null;
+}
+
+function getDefaultProjectRoot(): string {
+  const homeDir = os.homedir();
+  const candidates = [
+    path.join(homeDir, "Projects"),
+    path.join(homeDir, "projects"),
+    process.cwd(),
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (fs.statSync(candidate).isDirectory()) return candidate;
+    } catch {}
+  }
+  return process.cwd();
+}
+
+function resolveDirectiveProjectPath(
+  ceoMessage: string,
+  options: DelegationOptions = {},
+): { projectPath: string | null; source: string } {
+  const explicitProjectPath = normalizeTextField(options.projectPath);
+  if (explicitProjectPath) {
+    const detected = detectProjectPath(explicitProjectPath);
+    if (detected) return { projectPath: detected, source: "project_path" };
+  }
+
+  const contextHint = normalizeTextField(options.projectContext);
+  if (contextHint) {
+    const detectedFromContext = detectProjectPath(contextHint);
+    if (detectedFromContext) return { projectPath: detectedFromContext, source: "project_context" };
+
+    const existingProjectHint = /기존\s*프로젝트|기존\s*작업|existing project|same project|current project|ongoing project|既存.*プロジェクト|現在.*プロジェクト|之前项目|当前项目/i
+      .test(contextHint);
+    if (existingProjectHint) {
+      const latest = getLatestKnownProjectPath();
+      if (latest) return { projectPath: latest, source: "recent_project" };
+    }
+
+    const newProjectHint = /신규\s*프로젝트|새\s*프로젝트|new project|greenfield|from scratch|新規.*プロジェクト|新项目/i
+      .test(contextHint);
+    if (newProjectHint) {
+      return { projectPath: getDefaultProjectRoot(), source: "new_project_default" };
+    }
+  }
+
+  const detectedFromMessage = detectProjectPath(ceoMessage);
+  if (detectedFromMessage) return { projectPath: detectedFromMessage, source: "message" };
+
+  return { projectPath: null, source: "none" };
 }
 
 function stripReportRequestPrefix(content: string): string {
@@ -7359,14 +7436,18 @@ function handleTaskDelegation(
     const taskId = randomUUID();
     const t = nowMs();
     const taskTitle = ceoMessage.length > 60 ? ceoMessage.slice(0, 57) + "..." : ceoMessage;
-    const detectedPath = detectProjectPath(ceoMessage);
+    const { projectPath: detectedPath, source: projectPathSource } = resolveDirectiveProjectPath(ceoMessage, options);
+    const projectContextHint = normalizeTextField(options.projectContext);
     db.prepare(`
       INSERT INTO tasks (id, title, description, department_id, status, priority, task_type, project_path, created_at, updated_at)
       VALUES (?, ?, ?, ?, 'planned', 1, 'general', ?, ?, ?)
     `).run(taskId, taskTitle, `[CEO] ${ceoMessage}`, leaderDeptId, detectedPath, t, t);
     appendTaskLog(taskId, "system", `CEO → ${leaderName}: ${ceoMessage}`);
     if (detectedPath) {
-      appendTaskLog(taskId, "system", `Project path detected: ${detectedPath}`);
+      appendTaskLog(taskId, "system", `Project path resolved (${projectPathSource}): ${detectedPath}`);
+    }
+    if (projectContextHint) {
+      appendTaskLog(taskId, "system", `Project context hint: ${projectContextHint}`);
     }
 
     broadcast("task_update", db.prepare("SELECT * FROM tasks WHERE id = ?").get(taskId));
@@ -7852,10 +7933,14 @@ app.post("/api/directives", (req, res) => {
   scheduleAnnouncementReplies(content);
   const directivePolicy = analyzeDirectivePolicy(content);
   const explicitSkip = body.skipPlannedMeeting === true;
+  const explicitProjectPath = normalizeTextField(body.project_path);
+  const explicitProjectContext = normalizeTextField(body.project_context);
   const shouldDelegate = shouldExecuteDirectiveDelegation(directivePolicy, explicitSkip);
   const delegationOptions: DelegationOptions = {
     skipPlannedMeeting: explicitSkip || directivePolicy.skipPlannedMeeting,
     skipPlanSubtasks: explicitSkip || directivePolicy.skipPlanSubtasks,
+    projectPath: explicitProjectPath,
+    projectContext: explicitProjectContext,
   };
 
   if (shouldDelegate) {
@@ -7944,12 +8029,16 @@ app.post("/api/inbox", (req, res) => {
   scheduleAnnouncementReplies(content);
   const directivePolicy = isDirective ? analyzeDirectivePolicy(content) : null;
   const inboxExplicitSkip = body.skipPlannedMeeting === true;
+  const inboxProjectPath = normalizeTextField(body.project_path);
+  const inboxProjectContext = normalizeTextField(body.project_context);
   const shouldDelegateDirective = isDirective && directivePolicy
     ? shouldExecuteDirectiveDelegation(directivePolicy, inboxExplicitSkip)
     : false;
   const directiveDelegationOptions: DelegationOptions = {
     skipPlannedMeeting: inboxExplicitSkip || !!directivePolicy?.skipPlannedMeeting,
     skipPlanSubtasks: inboxExplicitSkip || !!directivePolicy?.skipPlanSubtasks,
+    projectPath: inboxProjectPath,
+    projectContext: inboxProjectContext,
   };
 
   if (shouldDelegateDirective) {
