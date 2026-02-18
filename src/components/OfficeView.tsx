@@ -1948,9 +1948,9 @@ export default function OfficeView({
 
     for (const call of ceoOfficeCalls) {
       if (processedCeoOfficeRef.current.has(call.id)) continue;
-      processedCeoOfficeRef.current.add(call.id);
 
       if (call.action === "dismiss") {
+        processedCeoOfficeRef.current.add(call.id);
         for (let i = deliveriesRef.current.length - 1; i >= 0; i--) {
           const d = deliveriesRef.current[i];
           if (d.agentId === call.fromAgentId && d.holdAtSeat) {
@@ -1965,24 +1965,21 @@ export default function OfficeView({
 
       const seats = ceoMeetingSeatsRef.current;
       const seat = seats.length > 0 ? seats[call.seatIndex % seats.length] : null;
-      if (!seat) {
-        onCeoOfficeCallProcessed?.(call.id);
-        continue;
-      }
+      if (!seat) continue; // seats not ready yet — retry on next render
 
       if (call.action === "speak") {
+        processedCeoOfficeRef.current.add(call.id);
         const line = pickLine(call);
         renderSpeechBubble(seat.x, seat.y, call.phase, line);
         onCeoOfficeCallProcessed?.(call.id);
         continue;
       }
 
+      // action === "arrive" (default)
       const fromPos = agentPosRef.current.get(call.fromAgentId);
-      if (!fromPos) {
-        onCeoOfficeCallProcessed?.(call.id);
-        continue;
-      }
+      if (!fromPos) continue; // agent not rendered yet — retry on next render
 
+      processedCeoOfficeRef.current.add(call.id);
       const dc = new Container();
       const spriteNum = spriteMapRef.current.get(call.fromAgentId) ?? ((hashStr(call.fromAgentId) % 12) + 1);
       const frames: Texture[] = [];
@@ -2047,7 +2044,7 @@ export default function OfficeView({
 
       onCeoOfficeCallProcessed?.(call.id);
     }
-  }, [ceoOfficeCalls, onCeoOfficeCallProcessed, language]);
+  }, [ceoOfficeCalls, onCeoOfficeCallProcessed, language, agents]);
 
   // ── CLI Usage Gauges ──
   const [cliStatus, setCliStatus] = useState<CliStatusMap | null>(null);

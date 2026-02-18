@@ -261,6 +261,7 @@ export default function App() {
           action?: "arrive" | "speak" | "dismiss";
           line?: string;
         };
+        console.warn(`[CEO_CALL_RX] action=${p.action} agent=${p.from_agent_id} seat=${p.seat_index}`);
         if (!p.from_agent_id) return;
         setCeoOfficeCalls((prev) => [
           ...prev,
