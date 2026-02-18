@@ -1566,6 +1566,129 @@ function seedApprovedPlanSubtasks(taskId: string, ownerDeptId: string | null, pl
   ), lang), taskId);
 }
 
+function seedReviewRevisionSubtasks(taskId: string, ownerDeptId: string | null, revisionNotes: string[] = []): number {
+  const task = db.prepare(
+    "SELECT title, description, assigned_agent_id, department_id FROM tasks WHERE id = ?"
+  ).get(taskId) as {
+    title: string;
+    description: string | null;
+    assigned_agent_id: string | null;
+    department_id: string | null;
+  } | undefined;
+  if (!task) return 0;
+
+  const baseDeptId = ownerDeptId ?? task.department_id;
+  const baseAssignee = task.assigned_agent_id;
+  const lang = resolveLang(task.description ?? task.title);
+  const now = nowMs();
+  const uniqueNotes: string[] = [];
+  const seen = new Set<string>();
+  for (const note of revisionNotes) {
+    const cleaned = note.replace(/\s+/g, " ").trim();
+    if (!cleaned) continue;
+    const key = cleaned.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    uniqueNotes.push(cleaned);
+    if (uniqueNotes.length >= 8) break;
+  }
+
+  const items: Array<{
+    title: string;
+    description: string;
+    status: "pending" | "blocked";
+    assignedAgentId: string | null;
+    blockedReason: string | null;
+    targetDepartmentId: string | null;
+  }> = [];
+
+  for (const note of uniqueNotes) {
+    const detail = note.replace(/^[\s\-*0-9.)]+/, "").trim();
+    if (!detail) continue;
+    const afterColon = detail.includes(":") ? detail.split(":").slice(1).join(":").trim() : detail;
+    const titleCore = (afterColon || detail).slice(0, 56).trim();
+    const clippedTitle = titleCore.length > 54 ? `${titleCore.slice(0, 53).trimEnd()}…` : titleCore;
+    const targetDeptId = analyzeSubtaskDepartment(detail, baseDeptId);
+    const targetDeptName = targetDeptId ? getDeptName(targetDeptId) : "";
+    const targetLeader = targetDeptId ? findTeamLeader(targetDeptId) : null;
+
+    items.push({
+      title: pickL(l(
+        [`[검토보완] ${clippedTitle || "추가 보완 항목"}`],
+        [`[Review Revision] ${clippedTitle || "Additional revision item"}`],
+        [`[レビュー補完] ${clippedTitle || "追加補完項目"}`],
+        [`[评审整改] ${clippedTitle || "补充整改事项"}`],
+      ), lang),
+      description: pickL(l(
+        [`Review 회의 보완 요청을 반영합니다: ${detail}`],
+        [`Apply the review-meeting revision request: ${detail}`],
+        [`Review会議で要請された補完項目を反映します: ${detail}`],
+        [`落实 Review 会议提出的整改项：${detail}`],
+      ), lang),
+      status: targetDeptId ? "blocked" : "pending",
+      assignedAgentId: targetDeptId ? (targetLeader?.id ?? null) : baseAssignee,
+      blockedReason: targetDeptId
+        ? pickL(l(
+          [`${targetDeptName} 협업 대기`],
+          [`Waiting for ${targetDeptName} collaboration`],
+          [`${targetDeptName}の協業待ち`],
+          [`等待${targetDeptName}协作`],
+        ), lang)
+        : null,
+      targetDepartmentId: targetDeptId,
+    });
+  }
+
+  items.push({
+    title: pickL(l(
+      ["[검토보완] 반영 결과 통합 및 재검토 제출"],
+      ["[Review Revision] Consolidate updates and resubmit for review"],
+      ["[レビュー補完] 反映結果を統合し再レビュー提出"],
+      ["[评审整改] 整合更新并重新提交评审"],
+    ), lang),
+    description: pickL(l(
+      ["보완 반영 결과를 취합해 재검토 제출본을 정리합니다."],
+      ["Collect revision outputs and prepare the re-review submission package."],
+      ["補完反映の成果を集約し、再レビュー提出版を整えます。"],
+      ["汇总整改结果并整理重新评审提交包。"],
+    ), lang),
+    status: "pending",
+    assignedAgentId: baseAssignee,
+    blockedReason: null,
+    targetDepartmentId: null,
+  });
+
+  const hasOpenSubtask = db.prepare(
+    "SELECT 1 FROM subtasks WHERE task_id = ? AND title = ? AND status != 'done' LIMIT 1"
+  );
+  const insertSubtask = db.prepare(`
+    INSERT INTO subtasks (id, task_id, title, description, status, assigned_agent_id, blocked_reason, target_department_id, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  let created = 0;
+  for (const st of items) {
+    const exists = hasOpenSubtask.get(taskId, st.title) as { 1: number } | undefined;
+    if (exists) continue;
+    const sid = randomUUID();
+    insertSubtask.run(
+      sid,
+      taskId,
+      st.title,
+      st.description,
+      st.status,
+      st.assignedAgentId,
+      st.blockedReason,
+      st.targetDepartmentId,
+      now,
+    );
+    created++;
+    broadcast("subtask_update", db.prepare("SELECT * FROM subtasks WHERE id = ?").get(sid));
+  }
+
+  return created;
+}
+
 // ---------------------------------------------------------------------------
 // SubTask parsing from CLI stream-json output
 // ---------------------------------------------------------------------------
@@ -2685,7 +2808,6 @@ const meetingPhaseByAgent = new Map<string, "kickoff" | "review">();
 const meetingTaskIdByAgent = new Map<string, string>();
 type MeetingReviewDecision = "reviewing" | "approved" | "hold";
 const meetingReviewDecisionByAgent = new Map<string, MeetingReviewDecision>();
-const MAX_REVIEW_APPROVAL_ROUNDS = 3;
 
 function getTaskStatusById(taskId: string): string | null {
   const row = db.prepare("SELECT status FROM tasks WHERE id = ?").get(taskId) as { status: string } | undefined;
@@ -3127,10 +3249,7 @@ function startReviewConsensusMeeting(
         ORDER BY started_at DESC, created_at DESC
         LIMIT 1
       `).get(taskId) as { id: string; round: number } | undefined;
-      const latestRoundRow = db.prepare(
-        "SELECT COALESCE(MAX(round), 0) AS max_round FROM meeting_minutes WHERE task_id = ? AND meeting_type = 'review'"
-      ).get(taskId) as { max_round: number } | undefined;
-      const round = existingMeeting?.round ?? ((latestRoundRow?.max_round ?? 0) + 1);
+      const round = existingMeeting?.round ?? 1;
       reviewRoundState.set(taskId, round);
 
       const planningLeader = leaders.find((l) => l.department_id === "planning") ?? leaders[0];
@@ -3277,10 +3396,10 @@ function startReviewConsensusMeeting(
         taskDescription,
         transcript,
         turnObjective: needsRevision
-          ? "Synthesize feedback and announce revision plan before the next approval round."
+          ? "Synthesize feedback and announce concrete remediation subtasks and execution handoff."
           : "Synthesize feedback and request final all-leader approval.",
         stanceHint: needsRevision
-          ? "State that revision items will be reflected and a follow-up approval round will run."
+          ? "State that remediation starts immediately and review will restart only after remediation is completed."
           : "State that the final review package is ready for immediate approval.",
         lang,
       });
@@ -3326,53 +3445,60 @@ function startReviewConsensusMeeting(
       if (needsRevision) {
         appendTaskLog(taskId, "system", `Review consensus round ${round}: revision requested`);
         const memoItems = collectRevisionMemoItems(transcript);
-        if (round >= MAX_REVIEW_APPROVAL_ROUNDS) {
-          appendTaskProjectMemo(taskId, "review", round, memoItems, lang);
-          appendTaskLog(
-            taskId,
-            "system",
-            `Review consensus round ${round}: round cap reached, proceeding with memo (${memoItems.length} items)`,
-          );
-          notifyCeo(pickL(l(
-            [`[CEO OFFICE] '${taskTitle}' 리뷰 라운드가 ${MAX_REVIEW_APPROVAL_ROUNDS}회에 도달했습니다. 미해결 보완사항을 프로젝트 메모에 기록하고 현재 결과 기준으로 진행합니다.`],
-            [`[CEO OFFICE] '${taskTitle}' reached ${MAX_REVIEW_APPROVAL_ROUNDS} review rounds. Unresolved items were recorded in the project memo and the workflow will proceed with current results.`],
-            [`[CEO OFFICE] '${taskTitle}' はレビュー${MAX_REVIEW_APPROVAL_ROUNDS}ラウンドに達しました。未解決項目をプロジェクトメモへ記録し、現時点の結果で進行します。`],
-            [`[CEO OFFICE] '${taskTitle}' 评审已达到 ${MAX_REVIEW_APPROVAL_ROUNDS} 轮。未解决项已写入项目备忘录，流程将按当前结果继续。`],
-          ), lang), taskId);
-          if (meetingId) finishMeetingMinutes(meetingId, "completed");
-          dismissLeadersFromCeoOffice(taskId, leaders);
-          reviewRoundState.delete(taskId);
-          reviewInFlight.delete(taskId);
-          onApproved();
-          return;
-        }
+        appendTaskProjectMemo(taskId, "review", round, memoItems, lang);
+        const revisionSubtaskCount = seedReviewRevisionSubtasks(taskId, departmentId, memoItems);
+        appendTaskLog(
+          taskId,
+          "system",
+          `Review consensus round ${round}: revision subtasks queued (${revisionSubtaskCount})`,
+        );
         notifyCeo(pickL(l(
-          [`[CEO OFFICE] '${taskTitle}' 승인 보류. 기획팀이 보완안 반영 후 재승인 라운드를 시작합니다.`],
-          [`[CEO OFFICE] '${taskTitle}' approval is on hold. Planning will reflect revisions and start a re-approval round.`],
-          [`[CEO OFFICE] '${taskTitle}' は承認保留です。企画チームが修正反映後、再承認ラウンドを開始します。`],
-          [`[CEO OFFICE] '${taskTitle}'审批暂缓。企划团队将完成修订后发起再次审批。`],
+          [`[CEO OFFICE] '${taskTitle}' 1차 Review에서 승인 보류/조건부 승인으로 판단되었습니다. 보완 SubTask ${revisionSubtaskCount}건을 생성해 즉시 반영 단계로 전환합니다.`],
+          [`[CEO OFFICE] '${taskTitle}' ended as hold/conditional in the first review. Created ${revisionSubtaskCount} revision subtasks and switching immediately to remediation.`],
+          [`[CEO OFFICE] '${taskTitle}' は1回目のReviewで保留/条件付き承認となりました。補完SubTaskを${revisionSubtaskCount}件作成し、即時に反映フェーズへ移行します。`],
+          [`[CEO OFFICE] '${taskTitle}' 在第1轮 Review 被判定为保留/条件批准。已创建 ${revisionSubtaskCount} 个整改 SubTask，并立即转入整改执行阶段。`],
         ), lang), taskId);
 
-        const now = nowMs();
-        db.prepare("UPDATE tasks SET status = 'in_progress', updated_at = ? WHERE id = ?").run(now, taskId);
-        broadcast("task_update", db.prepare("SELECT * FROM tasks WHERE id = ?").get(taskId));
-
-        await sleepMs(2600);
-        if (abortIfInactive()) return;
-        const t2 = nowMs();
-        db.prepare("UPDATE tasks SET status = 'review', updated_at = ? WHERE id = ?").run(t2, taskId);
-        appendTaskLog(taskId, "system", `Review consensus round ${round}: revision reflected, back to review`);
-        broadcast("task_update", db.prepare("SELECT * FROM tasks WHERE id = ?").get(taskId));
-        notifyCeo(pickL(l(
-          [`[CEO OFFICE] '${taskTitle}' 보완안 반영 완료. 재검토 및 재승인 라운드를 시작합니다.`],
-          [`[CEO OFFICE] Revision updates for '${taskTitle}' are complete. Starting re-review and re-approval round.`],
-          [`[CEO OFFICE] '${taskTitle}' の修正反映が完了しました。再レビュー・再承認ラウンドを開始します。`],
-          [`[CEO OFFICE] '${taskTitle}'修订已完成，开始重新评审与再次审批。`],
-        ), lang), taskId);
         if (meetingId) finishMeetingMinutes(meetingId, "revision_requested");
         dismissLeadersFromCeoOffice(taskId, leaders);
+        reviewRoundState.delete(taskId);
         reviewInFlight.delete(taskId);
-        finishReview(taskId, taskTitle);
+
+        const latestTask = db.prepare(
+          "SELECT assigned_agent_id, department_id FROM tasks WHERE id = ?"
+        ).get(taskId) as { assigned_agent_id: string | null; department_id: string | null } | undefined;
+        const assignedAgent = latestTask?.assigned_agent_id
+          ? (db.prepare("SELECT * FROM agents WHERE id = ?").get(latestTask.assigned_agent_id) as AgentRow | undefined)
+          : undefined;
+        const fallbackLeader = findTeamLeader(latestTask?.department_id ?? departmentId);
+        const execAgent = assignedAgent ?? fallbackLeader;
+
+        if (!execAgent || activeProcesses.has(taskId)) {
+          appendTaskLog(taskId, "system", `Review remediation queued; waiting for executor run (task=${taskId})`);
+          notifyCeo(pickL(l(
+            [`'${taskTitle}' 보완 SubTask가 생성되었습니다. 실행 담당자가 재착수하면 반영 후 다시 Review를 진행합니다.`],
+            [`Revision subtasks for '${taskTitle}' were created. Once an executor resumes work, we'll re-enter review.`],
+            [`'${taskTitle}' の補完SubTaskを作成しました。実行担当が再着手すると、反映後に再Reviewします。`],
+            [`已为 '${taskTitle}' 创建整改 SubTask。执行负责人重新开工后，将在整改后再次 Review。`],
+          ), lang), taskId);
+          return;
+        }
+
+        const provider = execAgent.cli_provider || "claude";
+        if (!["claude", "codex", "gemini", "opencode"].includes(provider)) {
+          appendTaskLog(taskId, "system", `Review remediation queued; provider '${provider}' requires manual run restart`);
+          notifyCeo(pickL(l(
+            [`'${taskTitle}' 보완 SubTask를 생성했습니다. 현재 담당 CLI(${provider})는 자동 재실행 경로가 없어 수동 Run 후 재검토를 이어갑니다.`],
+            [`Revision subtasks were created for '${taskTitle}'. This CLI (${provider}) requires manual run restart before re-review.`],
+            [`'${taskTitle}' の補完SubTaskを作成しました。現在のCLI(${provider})は自動再実行に未対応のため、手動Run後に再Reviewします。`],
+            [`已为 '${taskTitle}' 创建整改 SubTask。当前 CLI（${provider}）不支持自动重跑，请手动 Run 后继续复审。`],
+          ), lang), taskId);
+          return;
+        }
+
+        const execDeptId = execAgent.department_id ?? latestTask?.department_id ?? departmentId;
+        const execDeptName = execDeptId ? getDeptName(execDeptId) : "Unassigned";
+        startTaskExecutionForAgent(taskId, execAgent, execDeptId, execDeptName);
         return;
       }
 
@@ -6403,7 +6529,7 @@ function startCrossDeptCooperation(
 /**
  * Detect project path from CEO message.
  * Recognizes:
- * 1. Absolute paths: /Users/classys/Projects/foo, ~/Projects/bar
+ * 1. Absolute paths: /home/user/Projects/foo, ~/Projects/bar
  * 2. Project names: "climpire 프로젝트", "claw-kanban에서"
  * 3. Known project directories under ~/Projects
  */
@@ -7045,6 +7171,81 @@ app.post("/api/announcements", (req, res) => {
     const mentionDelay = 5000 + Math.random() * 2000;
     setTimeout(() => {
       const processedDepts = new Set<string>();
+
+      for (const deptId of mentions.deptIds) {
+        if (processedDepts.has(deptId)) continue;
+        processedDepts.add(deptId);
+        const leader = findTeamLeader(deptId);
+        if (leader) {
+          handleTaskDelegation(leader, content, "");
+        }
+      }
+
+      for (const agentId of mentions.agentIds) {
+        const mentioned = db.prepare("SELECT * FROM agents WHERE id = ?").get(agentId) as AgentRow | undefined;
+        if (mentioned?.department_id && !processedDepts.has(mentioned.department_id)) {
+          processedDepts.add(mentioned.department_id);
+          const leader = findTeamLeader(mentioned.department_id);
+          if (leader) {
+            handleTaskDelegation(leader, content, "");
+          }
+        }
+      }
+    }, mentionDelay);
+  }
+
+  res.json({ ok: true, message: msg });
+});
+
+// ── Directives (CEO ! command) ──────────────────────────────────────────────
+app.post("/api/directives", (req, res) => {
+  const body = req.body ?? {};
+  const content = body.content;
+  if (!content || typeof content !== "string") {
+    return res.status(400).json({ error: "content_required" });
+  }
+
+  const id = randomUUID();
+  const t = nowMs();
+
+  // 1. Store directive message
+  db.prepare(`
+    INSERT INTO messages (id, sender_type, sender_id, receiver_type, receiver_id, content, message_type, created_at)
+    VALUES (?, 'ceo', NULL, 'all', NULL, ?, 'directive', ?)
+  `).run(id, content, t);
+
+  const msg = {
+    id,
+    sender_type: "ceo",
+    sender_id: null,
+    receiver_type: "all",
+    receiver_id: null,
+    content,
+    message_type: "directive",
+    created_at: t,
+  };
+
+  // 2. Broadcast to all
+  broadcast("announcement", msg);
+
+  // 3. Team leaders respond
+  scheduleAnnouncementReplies(content);
+
+  // 4. Auto-delegate to planning team leader
+  const planningLeader = findTeamLeader("planning");
+  if (planningLeader) {
+    const delegationDelay = 3000 + Math.random() * 2000;
+    setTimeout(() => {
+      handleTaskDelegation(planningLeader, content, "");
+    }, delegationDelay);
+  }
+
+  // 5. Additional @mentions trigger delegation to other departments
+  const mentions = detectMentions(content);
+  if (mentions.deptIds.length > 0 || mentions.agentIds.length > 0) {
+    const mentionDelay = 5000 + Math.random() * 2000;
+    setTimeout(() => {
+      const processedDepts = new Set<string>(["planning"]);
 
       for (const deptId of mentions.deptIds) {
         if (processedDepts.has(deptId)) continue;

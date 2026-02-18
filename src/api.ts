@@ -158,6 +158,11 @@ export async function sendAnnouncement(content: string): Promise<string> {
   return j.id;
 }
 
+export async function sendDirective(content: string): Promise<string> {
+  const j = await post('/api/directives', { content }) as { id: string };
+  return j.id;
+}
+
 export async function clearMessages(agentId?: string): Promise<void> {
   const params = new URLSearchParams();
   if (agentId) {

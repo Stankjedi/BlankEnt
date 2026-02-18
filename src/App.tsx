@@ -442,6 +442,14 @@ export default function App() {
     }
   }
 
+  async function handleSendDirective(content: string) {
+    try {
+      await api.sendDirective(content);
+    } catch (e) {
+      console.error("Directive failed:", e);
+    }
+  }
+
   async function handleCreateTask(input: {
     title: string;
     description?: string;
@@ -776,6 +784,7 @@ export default function App() {
             agents={agents}
             onSendMessage={handleSendMessage}
             onSendAnnouncement={handleSendAnnouncement}
+            onSendDirective={handleSendDirective}
             onClearMessages={async (agentId) => {
               try {
                 await api.clearMessages(agentId);

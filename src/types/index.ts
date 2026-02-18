@@ -109,7 +109,7 @@ export interface MeetingMinute {
 // Messages
 export type SenderType = 'ceo' | 'agent' | 'system';
 export type ReceiverType = 'agent' | 'department' | 'all';
-export type MessageType = 'chat' | 'task_assign' | 'announcement' | 'report' | 'status_update';
+export type MessageType = 'chat' | 'task_assign' | 'announcement' | 'directive' | 'report' | 'status_update';
 
 export interface Message {
   id: string;

@@ -11,6 +11,7 @@ interface ChatPanelProps {
   agents: Agent[];
   onSendMessage: (content: string, receiverType: 'agent' | 'department' | 'all', receiverId?: string, messageType?: string) => void;
   onSendAnnouncement: (content: string) => void;
+  onSendDirective: (content: string) => void;
   onClearMessages?: (agentId?: string) => void;
   onClose: () => void;
 }
@@ -72,6 +73,7 @@ export function ChatPanel({
   agents,
   onSendMessage,
   onSendAnnouncement,
+  onSendDirective,
   onClearMessages,
   onClose,
 }: ChatPanelProps) {
@@ -130,9 +132,22 @@ export function ChatPanel({
     }
   }, [selectedAgent]);
 
+  const isDirectiveMode = input.trimStart().startsWith('!');
+
   const handleSend = () => {
     const trimmed = input.trim();
     if (!trimmed) return;
+
+    // ! directive — priority over all modes
+    if (trimmed.startsWith('!')) {
+      const directiveContent = trimmed.slice(1).trim();
+      if (directiveContent) {
+        onSendDirective(directiveContent);
+        setInput('');
+        textareaRef.current?.focus();
+        return;
+      }
+    }
 
     if (mode === 'announcement') {
       onSendAnnouncement(trimmed);
@@ -168,7 +183,7 @@ export function ChatPanel({
   const visibleMessages = messages.filter((msg) => {
     if (!selectedAgent) {
       // Show only announcements / all broadcasts when no agent selected
-      return msg.receiver_type === 'all' || msg.message_type === 'announcement';
+      return msg.receiver_type === 'all' || msg.message_type === 'announcement' || msg.message_type === 'directive';
     }
     // Show messages between CEO and selected agent
     return (
@@ -178,6 +193,7 @@ export function ChatPanel({
       (msg.sender_type === 'agent' &&
         msg.sender_id === selectedAgent.id) ||
       msg.message_type === 'announcement' ||
+      msg.message_type === 'directive' ||
       msg.receiver_type === 'all'
     );
   });
@@ -319,8 +335,9 @@ export function ChatPanel({
           <>
             {visibleMessages.map((msg) => {
               const isCeo = msg.sender_type === 'ceo';
+              const isDirective = msg.message_type === 'directive';
               const isSystem =
-                msg.sender_type === 'system' || msg.message_type === 'announcement';
+                msg.sender_type === 'system' || msg.message_type === 'announcement' || isDirective;
 
               // Resolve sender name
               const senderAgent =
@@ -351,10 +368,19 @@ export function ChatPanel({
               }
 
               if (isSystem || msg.receiver_type === 'all') {
-                // Center announcement bubble (CEO announcements)
+                // Center announcement / directive bubble
                 return (
                   <div key={msg.id} className="flex flex-col items-center gap-1">
-                    <div className="max-w-[85%] bg-yellow-500/15 border border-yellow-500/30 text-yellow-300 text-sm rounded-2xl px-4 py-2.5 text-center shadow-sm">
+                    {isDirective && (
+                      <span className="text-xs font-bold text-red-400 px-2 py-0.5 bg-red-500/10 border border-red-500/30 rounded-full">
+                        {tr('업무지시', 'Directive', '業務指示', '业务指示')}
+                      </span>
+                    )}
+                    <div className={`max-w-[85%] text-sm rounded-2xl px-4 py-2.5 text-center shadow-sm ${
+                      isDirective
+                        ? 'bg-red-500/15 border border-red-500/30 text-red-300'
+                        : 'bg-yellow-500/15 border border-yellow-500/30 text-yellow-300'
+                    }`}>
                       <MessageContent content={msg.content} />
                     </div>
                     <span className="text-xs text-gray-600">
@@ -454,22 +480,30 @@ export function ChatPanel({
       </div>
 
       {/* Mode hint */}
-      {mode !== 'chat' && (
+      {(mode !== 'chat' || isDirectiveMode) && (
         <div className="px-4 py-1 flex-shrink-0">
-          {mode === 'task' && (
-            <p className="text-xs text-blue-400">
-              📋 {tr('업무 지시 모드 — 에이전트에게 작업을 할당합니다', 'Task mode - assign work to the agent', 'タスク指示モード — エージェントに作業を割り当てます', '任务指示模式 — 向代理分配工作')}
+          {isDirectiveMode ? (
+            <p className="text-xs text-red-400 font-medium">
+              {tr('업무지시 모드 — 기획팀이 자동으로 주관합니다', 'Directive mode - Planning team auto-coordinates', '業務指示モード — 企画チームが自動的に主管します', '业务指示模式 — 企划组自动主管')}
             </p>
-          )}
-          {mode === 'announcement' && (
-            <p className="text-xs text-yellow-400">
-              📢 {tr('전사 공지 모드 — 모든 에이전트에게 전달됩니다', 'Announcement mode - sent to all agents', '全体告知モード — すべてのエージェントに送信', '全员公告模式 — 将发送给所有代理')}
-            </p>
-          )}
-          {mode === 'report' && (
-            <p className="text-xs text-emerald-400">
-              📊 {tr('보고 요청 모드 — 보고서/발표자료 작성 작업을 요청합니다', 'Report mode - request report/deck authoring', 'レポート依頼モード — レポート/資料作成を依頼します', '报告请求模式 — 请求撰写报告/演示资料')}
-            </p>
+          ) : (
+            <>
+              {mode === 'task' && (
+                <p className="text-xs text-blue-400">
+                  📋 {tr('업무 지시 모드 — 에이전트에게 작업을 할당합니다', 'Task mode - assign work to the agent', 'タスク指示モード — エージェントに作業を割り当てます', '任务指示模式 — 向代理分配工作')}
+                </p>
+              )}
+              {mode === 'announcement' && (
+                <p className="text-xs text-yellow-400">
+                  📢 {tr('전사 공지 모드 — 모든 에이전트에게 전달됩니다', 'Announcement mode - sent to all agents', '全体告知モード — すべてのエージェントに送信', '全员公告模式 — 将发送给所有代理')}
+                </p>
+              )}
+              {mode === 'report' && (
+                <p className="text-xs text-emerald-400">
+                  📊 {tr('보고 요청 모드 — 보고서/발표자료 작성 작업을 요청합니다', 'Report mode - request report/deck authoring', 'レポート依頼モード — レポート/資料作成を依頼します', '报告请求模式 — 请求撰写报告/演示资料')}
+                </p>
+              )}
+            </>
           )}
         </div>
       )}
@@ -478,7 +512,9 @@ export function ChatPanel({
       <div className="px-4 pb-4 pt-2 flex-shrink-0">
         <div
           className={`flex items-end gap-2 bg-gray-800 rounded-2xl border transition-colors ${
-            isAnnouncementMode
+            isDirectiveMode
+              ? 'border-red-500/50 focus-within:border-red-400'
+              : isAnnouncementMode
               ? 'border-yellow-500/50 focus-within:border-yellow-400'
               : mode === 'task'
               ? 'border-blue-500/50 focus-within:border-blue-400'
@@ -524,7 +560,9 @@ export function ChatPanel({
             disabled={!input.trim()}
             className={`flex-shrink-0 w-9 h-9 mb-2 mr-2 rounded-xl flex items-center justify-center transition-all ${
               input.trim()
-                ? isAnnouncementMode
+                ? isDirectiveMode
+                  ? 'bg-red-600 hover:bg-red-500 text-white'
+                  : isAnnouncementMode
                   ? 'bg-yellow-500 hover:bg-yellow-400 text-gray-900'
                   : mode === 'task'
                   ? 'bg-blue-600 hover:bg-blue-500 text-white'
