@@ -1123,6 +1123,18 @@ function summarizeForMeetingBubble(text: string, maxChars = 96): string {
   return `${cleaned.slice(0, maxChars - 1).trimEnd()}…`;
 }
 
+function classifyMeetingReviewDecision(text: string): MeetingReviewDecision {
+  const cleaned = text.replace(/\s+/g, " ").trim();
+  if (!cleaned) return "reviewing";
+  if (/(보완|수정|보류|리스크|미흡|미완|추가.?필요|재검토|중단|불가|hold|revise|revision|changes?\s+requested|required|pending|risk|block|missing|incomplete|not\s+ready|保留|修正|风险|补充|未完成|暂缓|差し戻し)/i.test(cleaned)) {
+    return "hold";
+  }
+  if (/(승인|통과|문제없|진행.?가능|배포.?가능|approve|approved|lgtm|ship\s+it|go\s+ahead|承認|批准|通过|可发布)/i.test(cleaned)) {
+    return "approved";
+  }
+  return "reviewing";
+}
+
 function formatMeetingTranscript(transcript: MeetingTranscriptEntry[]): string {
   if (transcript.length === 0) return "(none)";
   return transcript
@@ -2671,6 +2683,8 @@ const meetingPresenceUntil = new Map<string, number>();
 const meetingSeatIndexByAgent = new Map<string, number>();
 const meetingPhaseByAgent = new Map<string, "kickoff" | "review">();
 const meetingTaskIdByAgent = new Map<string, string>();
+type MeetingReviewDecision = "reviewing" | "approved" | "hold";
+const meetingReviewDecisionByAgent = new Map<string, MeetingReviewDecision>();
 const MAX_REVIEW_APPROVAL_ROUNDS = 3;
 
 function getTaskStatusById(taskId: string): string | null {
@@ -2999,6 +3013,11 @@ function markAgentInMeeting(
   }
   if (phase) {
     meetingPhaseByAgent.set(agentId, phase);
+    if (phase === "review") {
+      meetingReviewDecisionByAgent.set(agentId, "reviewing");
+    } else {
+      meetingReviewDecisionByAgent.delete(agentId);
+    }
   }
   if (taskId) {
     meetingTaskIdByAgent.set(agentId, taskId);
@@ -3019,6 +3038,7 @@ function isAgentInMeeting(agentId: string): boolean {
     meetingSeatIndexByAgent.delete(agentId);
     meetingPhaseByAgent.delete(agentId);
     meetingTaskIdByAgent.delete(agentId);
+    meetingReviewDecisionByAgent.delete(agentId);
     return false;
   }
   return true;
@@ -3033,6 +3053,9 @@ function callLeadersToCeoOffice(taskId: string, leaders: AgentRow[], phase: "kic
       phase,
       task_id: taskId,
       action: "arrive",
+      decision: phase === "review"
+        ? (meetingReviewDecisionByAgent.get(leader.id) ?? "reviewing")
+        : undefined,
     });
   });
 }
@@ -3043,6 +3066,7 @@ function dismissLeadersFromCeoOffice(taskId: string, leaders: AgentRow[]): void 
     meetingSeatIndexByAgent.delete(leader.id);
     meetingPhaseByAgent.delete(leader.id);
     meetingTaskIdByAgent.delete(leader.id);
+    meetingReviewDecisionByAgent.delete(leader.id);
     broadcast("ceo_office_call", {
       from_agent_id: leader.id,
       task_id: taskId,
@@ -3059,6 +3083,12 @@ function emitMeetingSpeech(
   line: string,
 ): void {
   const preview = summarizeForMeetingBubble(line);
+  const decision = phase === "review" ? classifyMeetingReviewDecision(preview) : undefined;
+  if (decision) {
+    meetingReviewDecisionByAgent.set(agentId, decision);
+  } else {
+    meetingReviewDecisionByAgent.delete(agentId);
+  }
   broadcast("ceo_office_call", {
     from_agent_id: agentId,
     seat_index: seatIndex,
@@ -3066,6 +3096,7 @@ function emitMeetingSpeech(
     task_id: taskId,
     action: "speak",
     line: preview,
+    decision,
   });
 }
 
@@ -4052,6 +4083,7 @@ app.get("/api/meeting-presence", (_req, res) => {
     seat_index: number;
     phase: "kickoff" | "review";
     task_id: string | null;
+    decision: MeetingReviewDecision | null;
     until: number;
   }> = [];
 
@@ -4061,13 +4093,16 @@ app.get("/api/meeting-presence", (_req, res) => {
       meetingSeatIndexByAgent.delete(agentId);
       meetingPhaseByAgent.delete(agentId);
       meetingTaskIdByAgent.delete(agentId);
+      meetingReviewDecisionByAgent.delete(agentId);
       continue;
     }
+    const phase = meetingPhaseByAgent.get(agentId) ?? "kickoff";
     presence.push({
       agent_id: agentId,
       seat_index: meetingSeatIndexByAgent.get(agentId) ?? 0,
-      phase: meetingPhaseByAgent.get(agentId) ?? "kickoff",
+      phase,
       task_id: meetingTaskIdByAgent.get(agentId) ?? null,
+      decision: phase === "review" ? (meetingReviewDecisionByAgent.get(agentId) ?? "reviewing") : null,
       until,
     });
   }

@@ -11,7 +11,7 @@ import {
   AnimatedSprite,
   TextureStyle,
 } from "pixi.js";
-import type { Department, Agent, Task, MeetingPresence } from "../types";
+import type { Department, Agent, Task, MeetingPresence, MeetingReviewDecision } from "../types";
 import type { CliStatusMap } from "../types";
 import { getCliStatus, getCliUsage, refreshCliUsage, type CliUsageEntry, type CliUsageWindow } from "../api";
 import { useI18n, type UiLanguage } from "../i18n";
@@ -40,6 +40,8 @@ interface CeoOfficeCall {
   phase: "kickoff" | "review";
   action?: "arrive" | "speak" | "dismiss";
   line?: string;
+  decision?: MeetingReviewDecision;
+  holdUntil?: number;
 }
 
 interface OfficeViewProps {
@@ -75,6 +77,9 @@ interface Delivery {
   arrived?: boolean;
   seatedPoseApplied?: boolean;
   meetingSeatIndex?: number;
+  meetingDecision?: MeetingReviewDecision;
+  badgeGraphics?: Graphics;
+  badgeText?: Text;
 }
 
 interface RoomRect {
@@ -182,11 +187,23 @@ const LOCALE_TEXT = {
     ja: "📣 会議",
     zh: "📣 会议",
   },
-  meetingBadgeReview: {
+  meetingBadgeReviewing: {
+    ko: "🔎 검토중",
+    en: "🔎 Reviewing",
+    ja: "🔎 検討中",
+    zh: "🔎 评审中",
+  },
+  meetingBadgeApproved: {
     ko: "✅ 승인",
     en: "✅ Approval",
     ja: "✅ 承認",
     zh: "✅ 审批",
+  },
+  meetingBadgeHold: {
+    ko: "⚠ 보류",
+    en: "⚠ Hold",
+    ja: "⚠ 保留",
+    zh: "⚠ 暂缓",
   },
   kickoffLines: {
     ko: [
@@ -341,6 +358,75 @@ const BREAK_CHAT_MESSAGES: Record<SupportedLocale, string[]> = {
 
 function pickLocale<T>(locale: SupportedLocale, map: Record<SupportedLocale, T>): T {
   return map[locale] ?? map.ko;
+}
+
+function inferReviewDecision(line?: string | null): MeetingReviewDecision {
+  const cleaned = line?.replace(/\s+/g, " ").trim();
+  if (!cleaned) return "reviewing";
+  if (/(보완|수정|보류|리스크|미흡|미완|추가.?필요|재검토|중단|불가|hold|revise|revision|changes?\s+requested|required|pending|risk|block|missing|incomplete|not\s+ready|保留|修正|风险|补充|未完成|暂缓|差し戻し)/i.test(cleaned)) {
+    return "hold";
+  }
+  if (/(승인|통과|문제없|진행.?가능|배포.?가능|approve|approved|lgtm|ship\s+it|go\s+ahead|承認|批准|通过|可发布)/i.test(cleaned)) {
+    return "approved";
+  }
+  return "reviewing";
+}
+
+function resolveMeetingDecision(
+  phase: "kickoff" | "review",
+  decision?: MeetingReviewDecision | null,
+  line?: string,
+): MeetingReviewDecision | undefined {
+  if (phase !== "review") return undefined;
+  return decision ?? inferReviewDecision(line);
+}
+
+function getMeetingBadgeStyle(
+  locale: SupportedLocale,
+  phase: "kickoff" | "review",
+  decision?: MeetingReviewDecision,
+): { fill: number; stroke: number; text: string } {
+  if (phase !== "review") {
+    return {
+      fill: 0xf59e0b,
+      stroke: 0x111111,
+      text: pickLocale(locale, LOCALE_TEXT.meetingBadgeKickoff),
+    };
+  }
+
+  if (decision === "approved") {
+    return {
+      fill: 0x34d399,
+      stroke: 0x14532d,
+      text: pickLocale(locale, LOCALE_TEXT.meetingBadgeApproved),
+    };
+  }
+  if (decision === "hold") {
+    return {
+      fill: 0xf97316,
+      stroke: 0x7c2d12,
+      text: pickLocale(locale, LOCALE_TEXT.meetingBadgeHold),
+    };
+  }
+  return {
+    fill: 0x60a5fa,
+    stroke: 0x1e3a8a,
+    text: pickLocale(locale, LOCALE_TEXT.meetingBadgeReviewing),
+  };
+}
+
+function paintMeetingBadge(
+  badge: Graphics,
+  badgeText: Text,
+  locale: SupportedLocale,
+  phase: "kickoff" | "review",
+  decision?: MeetingReviewDecision,
+): void {
+  const style = getMeetingBadgeStyle(locale, phase, decision);
+  badge.clear();
+  badge.roundRect(-24, 4, 48, 13, 4).fill({ color: style.fill, alpha: 0.9 });
+  badge.roundRect(-24, 4, 48, 13, 4).stroke({ width: 1, color: style.stroke, alpha: 0.45 });
+  badgeText.text = style.text;
 }
 
 // Break spots: positive x = offset from room left; negative x = offset from room right
@@ -1917,6 +2003,7 @@ export default function OfficeView({
     for (const row of rows) {
       const seat = seats[row.seat_index % seats.length];
       if (!seat) continue;
+      const decision = resolveMeetingDecision(row.phase, row.decision);
 
       const existing = deliveriesRef.current.find(
         (d) => d.agentId === row.agent_id && d.holdAtSeat && !d.sprite.destroyed,
@@ -1929,8 +2016,12 @@ export default function OfficeView({
         existing.arrived = true;
         existing.progress = 1;
         existing.seatedPoseApplied = false;
+        existing.meetingDecision = decision;
         existing.sprite.position.set(seat.x, seat.y);
         existing.sprite.alpha = 1;
+        if (existing.badgeGraphics && existing.badgeText) {
+          paintMeetingBadge(existing.badgeGraphics, existing.badgeText, language, row.phase, decision);
+        }
         continue;
       }
 
@@ -1955,19 +2046,15 @@ export default function OfficeView({
       }
 
       const badge = new Graphics();
-      const badgeColor = row.phase === "review" ? 0x34d399 : 0xf59e0b;
-      badge.roundRect(-24, 4, 48, 13, 4).fill({ color: badgeColor, alpha: 0.9 });
-      badge.roundRect(-24, 4, 48, 13, 4).stroke({ width: 1, color: 0x111111, alpha: 0.35 });
       dc.addChild(badge);
       const badgeText = new Text({
-        text: row.phase === "review"
-          ? pickLocale(language, LOCALE_TEXT.meetingBadgeReview)
-          : pickLocale(language, LOCALE_TEXT.meetingBadgeKickoff),
+        text: "",
         style: new TextStyle({ fontSize: 7, fill: 0x111111, fontWeight: "bold", fontFamily: "system-ui, sans-serif" }),
       });
       badgeText.anchor.set(0.5, 0.5);
       badgeText.position.set(0, 10.5);
       dc.addChild(badgeText);
+      paintMeetingBadge(badge, badgeText, language, row.phase, decision);
 
       dc.position.set(seat.x, seat.y);
       dlLayer.addChild(dc);
@@ -1985,6 +2072,9 @@ export default function OfficeView({
         holdUntil: row.until,
         arrived: true,
         meetingSeatIndex: row.seat_index,
+        meetingDecision: decision,
+        badgeGraphics: badge,
+        badgeText,
       });
     }
 
@@ -2155,7 +2245,19 @@ export default function OfficeView({
       if (call.action === "speak") {
         processedCeoOfficeRef.current.add(call.id);
         const line = pickLine(call);
+        const decision = resolveMeetingDecision(call.phase, call.decision, line);
         renderSpeechBubble(seat.x, seat.y, call.phase, line);
+        if (call.phase === "review") {
+          const attendee = deliveriesRef.current.find(
+            (d) => d.agentId === call.fromAgentId && d.holdAtSeat && !d.sprite.destroyed,
+          );
+          if (attendee) {
+            attendee.meetingDecision = decision;
+            if (attendee.badgeGraphics && attendee.badgeText) {
+              paintMeetingBadge(attendee.badgeGraphics, attendee.badgeText, language, call.phase, decision);
+            }
+          }
+        }
         onCeoOfficeCallProcessed?.(call.id);
         continue;
       }
@@ -2188,19 +2290,16 @@ export default function OfficeView({
       }
 
       const badge = new Graphics();
-      const badgeColor = call.phase === "review" ? 0x34d399 : 0xf59e0b;
-      badge.roundRect(-24, 4, 48, 13, 4).fill({ color: badgeColor, alpha: 0.9 });
-      badge.roundRect(-24, 4, 48, 13, 4).stroke({ width: 1, color: 0x111111, alpha: 0.35 });
       dc.addChild(badge);
+      const decision = resolveMeetingDecision(call.phase, call.decision, call.line);
       const badgeText = new Text({
-        text: call.phase === "review"
-          ? pickLocale(language, LOCALE_TEXT.meetingBadgeReview)
-          : pickLocale(language, LOCALE_TEXT.meetingBadgeKickoff),
+        text: "",
         style: new TextStyle({ fontSize: 7, fill: 0x111111, fontWeight: "bold", fontFamily: "system-ui, sans-serif" }),
       });
       badgeText.anchor.set(0.5, 0.5);
       badgeText.position.set(0, 10.5);
       dc.addChild(badgeText);
+      paintMeetingBadge(badge, badgeText, language, call.phase, decision);
 
       dc.position.set(fromPos.x, fromPos.y);
       dlLayer.addChild(dc);
@@ -2223,8 +2322,11 @@ export default function OfficeView({
         type: "walk",
         agentId: call.fromAgentId,
         holdAtSeat: true,
-        holdUntil: Date.now() + 600_000,
+        holdUntil: call.holdUntil ?? (Date.now() + 600_000),
         meetingSeatIndex: call.seatIndex,
+        meetingDecision: decision,
+        badgeGraphics: badge,
+        badgeText,
       });
 
       onCeoOfficeCallProcessed?.(call.id);

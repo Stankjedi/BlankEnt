@@ -19,6 +19,7 @@ export interface Department {
 export type AgentRole = 'team_leader' | 'senior' | 'junior' | 'intern';
 export type AgentStatus = 'idle' | 'working' | 'break' | 'offline';
 export type CliProvider = 'claude' | 'codex' | 'gemini' | 'opencode' | 'copilot' | 'antigravity';
+export type MeetingReviewDecision = 'reviewing' | 'approved' | 'hold';
 
 export interface Agent {
   id: string;
@@ -42,6 +43,7 @@ export interface MeetingPresence {
   seat_index: number;
   phase: "kickoff" | "review";
   task_id: string | null;
+  decision?: MeetingReviewDecision | null;
   until: number;
 }
 

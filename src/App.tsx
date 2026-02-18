@@ -19,6 +19,7 @@ import type {
   CliStatusMap,
   SubTask,
   MeetingPresence,
+  MeetingReviewDecision,
 } from "./types";
 import { DEFAULT_SETTINGS } from "./types";
 import {
@@ -51,6 +52,7 @@ export interface CeoOfficeCall {
   phase: "kickoff" | "review";
   action?: "arrive" | "speak" | "dismiss";
   line?: string;
+  decision?: MeetingReviewDecision;
   taskId?: string;
   instant?: boolean;
   holdUntil?: number;
@@ -274,6 +276,7 @@ export default function App() {
           phase?: "kickoff" | "review";
           action?: "arrive" | "speak" | "dismiss";
           line?: string;
+          decision?: MeetingReviewDecision;
           task_id?: string;
           hold_until?: number;
         };
@@ -289,6 +292,9 @@ export default function App() {
             return [
               ...rest,
               {
+                decision: (p.phase ?? existing?.phase ?? "kickoff") === "review"
+                  ? (p.decision ?? existing?.decision ?? "reviewing")
+                  : null,
                 agent_id: p.from_agent_id,
                 seat_index: p.seat_index ?? existing?.seat_index ?? 0,
                 phase: p.phase ?? existing?.phase ?? "kickoff",
@@ -309,6 +315,7 @@ export default function App() {
             phase: p.phase ?? "kickoff",
             action,
             line: p.line,
+            decision: p.decision,
             taskId: p.task_id,
             holdUntil: p.hold_until,
             instant: action === "arrive" && viewRef.current !== "office",
