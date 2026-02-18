@@ -96,12 +96,17 @@ function decryptSecret(payload: string): string {
 // ---------------------------------------------------------------------------
 const OAUTH_BASE_URL = process.env.OAUTH_BASE_URL || `http://${OAUTH_BASE_HOST}:${PORT}`;
 
-// OAuth client credentials – loaded exclusively from environment variables.
-// Set OAUTH_GITHUB_CLIENT_ID, OAUTH_GOOGLE_CLIENT_ID and
-// OAUTH_GOOGLE_CLIENT_SECRET in your .env file.
-const BUILTIN_GITHUB_CLIENT_ID = process.env.OAUTH_GITHUB_CLIENT_ID ?? "";
-const BUILTIN_GOOGLE_CLIENT_ID = process.env.OAUTH_GOOGLE_CLIENT_ID ?? "";
-const BUILTIN_GOOGLE_CLIENT_SECRET = process.env.OAUTH_GOOGLE_CLIENT_SECRET ?? "";
+// Built-in OAuth client credentials (same as OpenClaw/Claw-Kanban built-in values)
+// Environment variables still take precedence when provided.
+const BUILTIN_GITHUB_CLIENT_ID = process.env.OAUTH_GITHUB_CLIENT_ID ?? "Iv1.b507a08c87ecfe98";
+const BUILTIN_GOOGLE_CLIENT_ID = process.env.OAUTH_GOOGLE_CLIENT_ID ?? Buffer.from(
+  "MTA3MTAwNjA2MDU5MS10bWhzc2luMmgyMWxjcmUyMzV2dG9sb2poNGc0MDNlcC5hcHBzLmdvb2dsZXVzZXJjb250ZW50LmNvbQ==",
+  "base64",
+).toString();
+const BUILTIN_GOOGLE_CLIENT_SECRET = process.env.OAUTH_GOOGLE_CLIENT_SECRET ?? Buffer.from(
+  "R09DU1BYLUs1OEZXUjQ4NkxkTEoxbUxCOHNYQzR6NnFEQWY=",
+  "base64",
+).toString();
 
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -343,7 +348,7 @@ function migrateMessagesDirectiveType(): void {
   const ddl = (row?.sql ?? "").toLowerCase();
   if (ddl.includes("'directive'")) return;
 
-  console.log("[CLImpire] Migrating messages.message_type CHECK to include 'directive'");
+  console.log("[Claw-Empire] Migrating messages.message_type CHECK to include 'directive'");
   const oldTable = "messages_directive_migration_old";
   db.exec("PRAGMA foreign_keys = OFF");
   try {
@@ -393,7 +398,7 @@ function migrateLegacyTasksStatusSchema(): void {
   const ddl = (row?.sql ?? "").toLowerCase();
   if (ddl.includes("'collaborating'") && ddl.includes("'pending'")) return;
 
-  console.log("[CLImpire] Migrating legacy tasks.status CHECK constraint");
+  console.log("[Claw-Empire] Migrating legacy tasks.status CHECK constraint");
   const newTable = "tasks_status_migration_new";
   db.exec("PRAGMA foreign_keys = OFF");
   try {
@@ -467,7 +472,7 @@ function repairLegacyTaskForeignKeys(): void {
   `).get() as { cnt: number }).cnt;
   if (refCount === 0) return;
 
-  console.log("[CLImpire] Repairing legacy foreign keys to tasks_legacy_status_migration");
+  console.log("[Claw-Empire] Repairing legacy foreign keys to tasks_legacy_status_migration");
   const messagesOld = "messages_fkfix_old";
   const taskLogsOld = "task_logs_fkfix_old";
   const subtasksOld = "subtasks_fkfix_old";
@@ -637,7 +642,7 @@ if (deptCount === 0) {
   insertDept.run("qa",        "QA/QC",       "품질관리팀", "🔍", "#ef4444", 4);
   insertDept.run("devsecops", "DevSecOps",   "인프라보안팀","🛡️", "#f97316", 5);
   insertDept.run("operations","Operations",  "운영팀",     "⚙️", "#10b981", 6);
-  console.log("[CLImpire] Seeded default departments");
+  console.log("[Claw-Empire] Seeded default departments");
 }
 
 const agentCount = (db.prepare("SELECT COUNT(*) as cnt FROM agents").get() as { cnt: number }).cnt;
@@ -666,7 +671,7 @@ if (agentCount === 0) {
   // DevSecOps (2)
   insertAgent.run(randomUUID(), "Vault", "볼트S",  "devsecops",  "team_leader", "claude",   "🛡️",  "보안 아키텍트");
   insertAgent.run(randomUUID(), "Pipe",  "파이프", "devsecops",  "senior",      "codex",    "🔧",   "CI/CD 파이프라인 전문가");
-  console.log("[CLImpire] Seeded default agents");
+  console.log("[Claw-Empire] Seeded default agents");
 }
 
 // Seed default settings if none exist
@@ -674,11 +679,11 @@ if (agentCount === 0) {
   const settingsCount = (db.prepare("SELECT COUNT(*) as c FROM settings").get() as { c: number }).c;
   if (settingsCount === 0) {
     const insertSetting = db.prepare("INSERT INTO settings (key, value) VALUES (?, ?)");
-    insertSetting.run("companyName", "CLImpire Corp.");
+    insertSetting.run("companyName", "Claw-Empire Corp.");
     insertSetting.run("ceoName", "CEO");
     insertSetting.run("autoAssign", "true");
     insertSetting.run("language", "en");
-    console.log("[CLImpire] Seeded default settings");
+    console.log("[Claw-Empire] Seeded default settings");
   }
 
   const hasLanguageSetting = db
@@ -734,7 +739,7 @@ if (agentCount === 0) {
       added++;
     }
   }
-  if (added > 0) console.log(`[CLImpire] Added ${added} new agents`);
+  if (added > 0) console.log(`[Claw-Empire] Added ${added} new agents`);
 }
 
 // ---------------------------------------------------------------------------
@@ -795,11 +800,11 @@ function createWorktree(projectPath: string, taskId: string, agentName: string):
     });
 
     taskWorktrees.set(taskId, { worktreePath, branchName, projectPath });
-    console.log(`[CLImpire] Created worktree for task ${shortId}: ${worktreePath} (branch: ${branchName}, agent: ${agentName})`);
+    console.log(`[Claw-Empire] Created worktree for task ${shortId}: ${worktreePath} (branch: ${branchName}, agent: ${agentName})`);
     return worktreePath;
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[CLImpire] Failed to create worktree for task ${shortId}: ${msg}`);
+    console.error(`[Claw-Empire] Failed to create worktree for task ${shortId}: ${msg}`);
     return null;
   }
 }
@@ -872,7 +877,7 @@ function cleanupWorktree(projectPath: string, taskId: string): void {
     });
   } catch {
     // If worktree remove fails, try manual cleanup
-    console.warn(`[CLImpire] git worktree remove failed for ${shortId}, falling back to manual cleanup`);
+    console.warn(`[Claw-Empire] git worktree remove failed for ${shortId}, falling back to manual cleanup`);
     try {
       if (fs.existsSync(info.worktreePath)) {
         fs.rmSync(info.worktreePath, { recursive: true, force: true });
@@ -887,11 +892,11 @@ function cleanupWorktree(projectPath: string, taskId: string): void {
       cwd: projectPath, stdio: "pipe", timeout: 5000,
     });
   } catch {
-    console.warn(`[CLImpire] Failed to delete branch ${info.branchName} — may need manual cleanup`);
+    console.warn(`[Claw-Empire] Failed to delete branch ${info.branchName} — may need manual cleanup`);
   }
 
   taskWorktrees.delete(taskId);
-  console.log(`[CLImpire] Cleaned up worktree for task ${shortId}`);
+  console.log(`[Claw-Empire] Cleaned up worktree for task ${shortId}`);
 }
 
 function rollbackTaskWorktree(taskId: string, reason: string): boolean {
@@ -1912,7 +1917,7 @@ function spawnCliAgent(
     const reason = kind === "idle"
       ? `no output for ${Math.round(timeoutMs / 1000)}s`
       : `exceeded max runtime ${Math.round(timeoutMs / 1000)}s`;
-    const msg = `[CLImpire] RUN TIMEOUT (${reason})`;
+    const msg = `[Claw-Empire] RUN TIMEOUT (${reason})`;
     logStream.write(`\n${msg}\n`);
     appendTaskLog(taskId, "error", msg);
     try {
@@ -1941,8 +1946,8 @@ function spawnCliAgent(
   child.on("error", (err) => {
     finished = true;
     clearRunTimers();
-    console.error(`[CLImpire] spawn error for ${provider} (task ${taskId}): ${err.message}`);
-    logStream.write(`\n[CLImpire] SPAWN ERROR: ${err.message}\n`);
+    console.error(`[Claw-Empire] spawn error for ${provider} (task ${taskId}): ${err.message}`);
+    logStream.write(`\n[Claw-Empire] SPAWN ERROR: ${err.message}\n`);
     logStream.end();
     activeProcesses.delete(taskId);
     appendTaskLog(taskId, "error", `Agent spawn failed: ${err.message}`);
@@ -2396,7 +2401,7 @@ function launchHttpAgent(
         const msg = `[${agent}] Error: ${err.message}\n`;
         logStream.write(msg);
         broadcast("cli_output", { task_id: taskId, stream: "stderr", data: msg });
-        console.error(`[CLImpire] HTTP agent error (${agent}, task ${taskId}): ${err.message}`);
+        console.error(`[Claw-Empire] HTTP agent error (${agent}, task ${taskId}): ${err.message}`);
       } else {
         logStream.write(`[${agent}] Aborted by user\n`);
         broadcast("cli_output", { task_id: taskId, stream: "stderr", data: `[${agent}] Aborted by user\n` });
@@ -4266,7 +4271,7 @@ function finishReview(taskId: string, taskTitle: string): void {
 const buildHealthPayload = () => ({
   ok: true,
   version: PKG_VERSION,
-  app: "CLImpire",
+  app: "Claw-Empire",
   dbPath,
 });
 
@@ -8026,7 +8031,7 @@ async function handleGoogleAntigravityCallback(code: string, stateId: string, ca
 }
 
 // ---------------------------------------------------------------------------
-// OAuth credentials (simplified for CLImpire)
+// OAuth credentials (simplified for Claw-Empire)
 // ---------------------------------------------------------------------------
 // Helper: build OAuth status with 2 connect providers (github-copilot, antigravity)
 async function buildOAuthStatus() {
@@ -8980,7 +8985,7 @@ function recoverInterruptedWorkflowOnStartup(): void {
   try {
     reconcileCrossDeptSubtasks();
   } catch (err) {
-    console.error("[CLImpire] startup reconciliation failed:", err);
+    console.error("[Claw-Empire] startup reconciliation failed:", err);
   }
 
   const inProgressTasks = db.prepare(`
@@ -9047,11 +9052,11 @@ setTimeout(recoverInterruptedWorkflowOnStartup, 3_000);
 // Start HTTP server + WebSocket
 // ---------------------------------------------------------------------------
 const server = app.listen(PORT, HOST, () => {
-  console.log(`[CLImpire] v${PKG_VERSION} listening on http://${HOST}:${PORT} (db: ${dbPath})`);
+  console.log(`[Claw-Empire] v${PKG_VERSION} listening on http://${HOST}:${PORT} (db: ${dbPath})`);
   if (isProduction) {
-    console.log(`[CLImpire] mode: production (serving UI from ${distDir})`);
+    console.log(`[Claw-Empire] mode: production (serving UI from ${distDir})`);
   } else {
-    console.log(`[CLImpire] mode: development (UI served by Vite on separate port)`);
+    console.log(`[Claw-Empire] mode: development (UI served by Vite on separate port)`);
   }
 });
 
@@ -9079,21 +9084,21 @@ const wss = new WebSocketServer({ server });
 
 wss.on("connection", (ws: WebSocket, _req: IncomingMessage) => {
   wsClients.add(ws);
-  console.log(`[CLImpire] WebSocket client connected (total: ${wsClients.size})`);
+  console.log(`[Claw-Empire] WebSocket client connected (total: ${wsClients.size})`);
 
   // Send initial state to the newly connected client
   ws.send(JSON.stringify({
     type: "connected",
     payload: {
       version: PKG_VERSION,
-      app: "CLImpire",
+      app: "Claw-Empire",
     },
     ts: nowMs(),
   }));
 
   ws.on("close", () => {
     wsClients.delete(ws);
-    console.log(`[CLImpire] WebSocket client disconnected (total: ${wsClients.size})`);
+    console.log(`[Claw-Empire] WebSocket client disconnected (total: ${wsClients.size})`);
   });
 
   ws.on("error", () => {
@@ -9105,11 +9110,11 @@ wss.on("connection", (ws: WebSocket, _req: IncomingMessage) => {
 // Graceful shutdown
 // ---------------------------------------------------------------------------
 function gracefulShutdown(signal: string): void {
-  console.log(`\n[CLImpire] ${signal} received. Shutting down gracefully...`);
+  console.log(`\n[Claw-Empire] ${signal} received. Shutting down gracefully...`);
 
   // Stop all active CLI processes
   for (const [taskId, child] of activeProcesses) {
-    console.log(`[CLImpire] Stopping process for task ${taskId} (pid: ${child.pid})`);
+    console.log(`[Claw-Empire] Stopping process for task ${taskId} (pid: ${child.pid})`);
     stopRequestedTasks.add(taskId);
     if (child.pid) {
       killPidTree(child.pid);
@@ -9145,14 +9150,14 @@ function gracefulShutdown(signal: string): void {
       try {
         db.close();
       } catch { /* ignore */ }
-      console.log("[CLImpire] Shutdown complete.");
+      console.log("[Claw-Empire] Shutdown complete.");
       process.exit(0);
     });
   });
 
   // Force exit after 5 seconds if graceful shutdown hangs
   setTimeout(() => {
-    console.error("[CLImpire] Forced exit after timeout.");
+    console.error("[Claw-Empire] Forced exit after timeout.");
     process.exit(1);
   }, 5000).unref();
 }

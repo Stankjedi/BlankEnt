@@ -1,8 +1,8 @@
-# CLImpire
+# Claw-Empire
 
 > Command your AI agent empire from the CEO desk.
 
-CLImpire is a **local-first AI agent office simulator** that turns CLI-based AI coding assistants (Claude Code, Codex, Gemini CLI, etc.) into a virtual company of autonomous agents. Watch them collaborate, hold meetings, and deliver tasks -- all from a pixel-art office view.
+Claw-Empire is a **local-first AI agent office simulator** that turns CLI-based AI coding assistants (Claude Code, Codex, Gemini CLI, etc.) into a virtual company of autonomous agents. Watch them collaborate, hold meetings, and deliver tasks -- all from a pixel-art office view.
 
 **Stack:** React 19 + Vite 7 + Tailwind CSS 4 (frontend) / Express 5 + SQLite (backend) / WebSocket (real-time)
 
@@ -158,7 +158,7 @@ climpire/
 
 ## CLI Provider Setup
 
-CLImpire works with various CLI-based AI coding assistants. Install at least one:
+Claw-Empire works with various CLI-based AI coding assistants. Install at least one:
 
 | Provider | Install | Auth |
 |----------|---------|------|

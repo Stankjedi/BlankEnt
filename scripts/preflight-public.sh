@@ -9,7 +9,7 @@ failures=0
 pass() { printf '[PASS] %s\n' "$1"; }
 fail() { printf '[FAIL] %s\n' "$1"; failures=$((failures + 1)); }
 
-echo "== CLImpire public release preflight =="
+echo "== Claw-Empire public release preflight =="
 
 for cmd in git rg node pnpm; do
   if ! command -v "$cmd" >/dev/null 2>&1; then

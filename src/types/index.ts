@@ -241,7 +241,7 @@ export interface CompanySettings {
 }
 
 export const DEFAULT_SETTINGS: CompanySettings = {
-  companyName: 'CLImpire Corp.',
+  companyName: 'Claw-Empire Corp.',
   ceoName: 'CEO',
   autoAssign: true,
   theme: 'dark',

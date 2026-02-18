@@ -33,12 +33,26 @@ type Locale = 'ko' | 'en' | 'ja' | 'zh';
 type TFunction = (messages: Record<Locale, string>) => string;
 
 const LANGUAGE_STORAGE_KEY = 'climpire.language';
+const HIDDEN_DONE_TASKS_STORAGE_KEY = 'climpire.hiddenDoneTaskIds';
 const LOCALE_TAGS: Record<Locale, string> = {
   ko: 'ko-KR',
   en: 'en-US',
   ja: 'ja-JP',
   zh: 'zh-CN',
 };
+
+function loadHiddenDoneTaskIds(): string[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = window.localStorage.getItem(HIDDEN_DONE_TASKS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((id): id is string => typeof id === 'string' && id.length > 0);
+  } catch {
+    return [];
+  }
+}
 
 function normalizeLocale(value: string | null | undefined): Locale | null {
   const code = (value ?? '').toLowerCase();
@@ -688,6 +702,7 @@ interface TaskCardProps {
   agents: Agent[];
   departments: Department[];
   taskSubtasks: SubTask[];
+  isHiddenDone?: boolean;
   onUpdateTask: TaskBoardProps['onUpdateTask'];
   onDeleteTask: TaskBoardProps['onDeleteTask'];
   onAssignTask: TaskBoardProps['onAssignTask'];
@@ -699,6 +714,8 @@ interface TaskCardProps {
   onOpenMeetingMinutes?: (taskId: string) => void;
   onMergeTask?: (id: string) => void;
   onDiscardTask?: (id: string) => void;
+  onHideDoneTask?: (id: string) => void;
+  onUnhideDoneTask?: (id: string) => void;
 }
 
 const SUBTASK_STATUS_ICON: Record<string, string> = {
@@ -713,6 +730,7 @@ function TaskCard({
   agents,
   departments,
   taskSubtasks,
+  isHiddenDone,
   onUpdateTask,
   onDeleteTask,
   onAssignTask,
@@ -722,6 +740,8 @@ function TaskCard({
   onResumeTask,
   onOpenTerminal,
   onOpenMeetingMinutes,
+  onHideDoneTask,
+  onUnhideDoneTask,
 }: TaskCardProps) {
   const { t, localeTag, locale } = useI18n();
   const [expanded, setExpanded] = useState(false);
@@ -971,6 +991,24 @@ function TaskCard({
             {t({ ko: 'Diff', en: 'Diff', ja: '差分', zh: '差异' })}
           </button>
         )}
+        {task.status === 'done' && !isHiddenDone && onHideDoneTask && (
+          <button
+            onClick={() => onHideDoneTask(task.id)}
+            title={t({ ko: '완료 작업 숨기기', en: 'Hide completed task', ja: '完了タスクを非表示', zh: '隐藏已完成任务' })}
+            className="flex items-center justify-center gap-1 rounded-lg bg-slate-700 px-2 py-1.5 text-xs text-slate-300 transition hover:bg-slate-600 hover:text-white"
+          >
+            🙈 {t({ ko: '숨김', en: 'Hide', ja: '非表示', zh: '隐藏' })}
+          </button>
+        )}
+        {task.status === 'done' && !!isHiddenDone && onUnhideDoneTask && (
+          <button
+            onClick={() => onUnhideDoneTask(task.id)}
+            title={t({ ko: '숨긴 작업 복원', en: 'Restore hidden task', ja: '非表示タスクを復元', zh: '恢复隐藏任务' })}
+            className="flex items-center justify-center gap-1 rounded-lg bg-blue-800 px-2 py-1.5 text-xs text-blue-200 transition hover:bg-blue-700 hover:text-white"
+          >
+            👁 {t({ ko: '복원', en: 'Restore', ja: '復元', zh: '恢复' })}
+          </button>
+        )}
         {canDelete && (
           <button
             onClick={() => {
@@ -1109,6 +1147,57 @@ export function TaskBoard({
   const [filterAgent, setFilterAgent] = useState('');
   const [filterType, setFilterType] = useState('');
   const [search, setSearch] = useState('');
+  const [showHiddenDoneTasks, setShowHiddenDoneTasks] = useState(false);
+  const [hiddenDoneTaskIds, setHiddenDoneTaskIds] = useState<Set<string>>(
+    () => new Set(loadHiddenDoneTaskIds()),
+  );
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(
+      HIDDEN_DONE_TASKS_STORAGE_KEY,
+      JSON.stringify([...hiddenDoneTaskIds]),
+    );
+  }, [hiddenDoneTaskIds]);
+
+  useEffect(() => {
+    const validDoneTaskIds = new Set(tasks.filter((task) => task.status === 'done').map((task) => task.id));
+    setHiddenDoneTaskIds((prev) => {
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (validDoneTaskIds.has(id)) next.add(id);
+      }
+      if (next.size === prev.size) {
+        let same = true;
+        for (const id of next) {
+          if (!prev.has(id)) {
+            same = false;
+            break;
+          }
+        }
+        if (same) return prev;
+      }
+      return next;
+    });
+  }, [tasks]);
+
+  const hideDoneTask = useCallback((taskId: string) => {
+    setHiddenDoneTaskIds((prev) => {
+      if (prev.has(taskId)) return prev;
+      const next = new Set(prev);
+      next.add(taskId);
+      return next;
+    });
+  }, []);
+
+  const unhideDoneTask = useCallback((taskId: string) => {
+    setHiddenDoneTaskIds((prev) => {
+      if (!prev.has(taskId)) return prev;
+      const next = new Set(prev);
+      next.delete(taskId);
+      return next;
+    });
+  }, []);
 
   const filteredTasks = useMemo(() => {
     return tasks.filter((t) => {
@@ -1116,9 +1205,12 @@ export function TaskBoard({
       if (filterAgent && t.assigned_agent_id !== filterAgent) return false;
       if (filterType && t.task_type !== filterType) return false;
       if (search && !t.title.toLowerCase().includes(search.toLowerCase())) return false;
+      const hiddenDone = t.status === 'done' && hiddenDoneTaskIds.has(t.id);
+      if (showHiddenDoneTasks) return hiddenDone;
+      if (hiddenDone) return false;
       return true;
     });
-  }, [tasks, filterDept, filterAgent, filterType, search]);
+  }, [tasks, filterDept, filterAgent, filterType, search, hiddenDoneTaskIds, showHiddenDoneTasks]);
 
   const tasksByStatus = useMemo(() => {
     const map: Record<string, Task[]> = {};
@@ -1140,6 +1232,13 @@ export function TaskBoard({
   }, [subtasks]);
 
   const activeFilterCount = [filterDept, filterAgent, filterType, search].filter(Boolean).length;
+  const hiddenDoneCount = useMemo(() => {
+    let count = 0;
+    for (const task of tasks) {
+      if (task.status === 'done' && hiddenDoneTaskIds.has(task.id)) count++;
+    }
+    return count;
+  }, [tasks, hiddenDoneTaskIds]);
 
   return (
     <div className="flex h-full flex-col gap-4 bg-slate-950 p-4">
@@ -1158,6 +1257,16 @@ export function TaskBoard({
             })})`}
         </span>
         <div className="ml-auto flex items-center gap-2">
+          {(hiddenDoneCount > 0 || showHiddenDoneTasks) && (
+            <button
+              onClick={() => setShowHiddenDoneTasks((prev) => !prev)}
+              className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 transition hover:bg-slate-800 hover:text-white"
+            >
+              {showHiddenDoneTasks
+                ? `↩ ${t({ ko: '일반 Task 보기', en: 'Show Regular Tasks', ja: '通常タスク表示', zh: '查看常规任务' })}`
+                : `👁 ${t({ ko: '숨긴 Task 보기', en: 'View Hidden Tasks', ja: '非表示タスク表示', zh: '查看隐藏任务' })} (${hiddenDoneCount})`}
+            </button>
+          )}
           {activeFilterCount > 0 && (
             <button
               onClick={() => {
@@ -1234,6 +1343,7 @@ export function TaskBoard({
                       agents={agents}
                       departments={departments}
                       taskSubtasks={subtasksByTask[task.id] ?? []}
+                      isHiddenDone={hiddenDoneTaskIds.has(task.id)}
                       onUpdateTask={onUpdateTask}
                       onDeleteTask={onDeleteTask}
                       onAssignTask={onAssignTask}
@@ -1245,6 +1355,8 @@ export function TaskBoard({
                       onOpenMeetingMinutes={onOpenMeetingMinutes}
                       onMergeTask={onMergeTask}
                       onDiscardTask={onDiscardTask}
+                      onHideDoneTask={hideDoneTask}
+                      onUnhideDoneTask={unhideDoneTask}
                     />
                   ))
                 )}
