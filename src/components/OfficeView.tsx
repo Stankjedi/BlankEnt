@@ -84,6 +84,37 @@ const TILE = 20;
 const CEO_SPEED = 2.5;
 const DELIVERY_SPEED = 0.012;
 
+const BREAK_ROOM_H = 110;
+const BREAK_ROOM_GAP = 16;
+
+const BREAK_THEME = {
+  floor1: 0x2a2218,
+  floor2: 0x332a1e,
+  wall: 0x6b5234,
+  accent: 0xe8a849,
+};
+
+const BREAK_CHAT_MESSAGES = [
+  "커피 한 잔 더~", "오늘 점심 뭐 먹지?", "아 졸려...",
+  "주말에 뭐 해?", "이번 프로젝트 힘들다ㅋ", "카페라떼 최고!",
+  "오늘 날씨 좋다~", "야근 싫어ㅠ", "맛있는 거 먹고 싶다",
+  "조금만 쉬자~", "ㅋㅋㅋㅋ", "간식 왔다!", "5분만 더~",
+  "힘내자 파이팅!", "에너지 충전 중...", "집에 가고 싶다~",
+];
+
+// Break spots: positive x = offset from room left; negative x = offset from room right
+// These are calibrated to match furniture positions drawn in buildScene
+const BREAK_SPOTS = [
+  { x: 86,  y: 72, dir: 'D' },   // 왼쪽 소파 좌측 (sofa at baseX+50, width 80)
+  { x: 110, y: 72, dir: 'D' },   // 왼쪽 소파 중앙
+  { x: 134, y: 72, dir: 'D' },   // 왼쪽 소파 우측
+  { x: 30,  y: 58, dir: 'R' },   // 커피머신 앞 (machine at baseX, y+20)
+  { x: -112, y: 72, dir: 'D' },  // 우측 소파 좌측 (sofa at rightX-120, width 80)
+  { x: -82,  y: 72, dir: 'D' },  // 우측 소파 우측
+  { x: -174, y: 56, dir: 'L' },  // 하이테이블 왼쪽 (table at rightX-170, width 36)
+  { x: -144, y: 56, dir: 'R' },  // 하이테이블 오른쪽
+];
+
 const DEPT_THEME: Record<
   string,
   { floor1: number; floor2: number; wall: number; accent: number }
@@ -206,6 +237,84 @@ function drawBookshelf(parent: Container, x: number, y: number) {
   parent.addChild(g);
 }
 
+function drawCoffeeMachine(parent: Container, x: number, y: number) {
+  const g = new Graphics();
+  g.roundRect(x, y, 20, 28, 2).fill(0x555555);
+  g.roundRect(x + 1, y + 1, 18, 26, 1).fill(0x666666);
+  // buttons
+  g.circle(x + 6, y + 6, 2).fill(0xff4444);
+  g.circle(x + 14, y + 6, 2).fill(0x44ff44);
+  // nozzle
+  g.rect(x + 8, y + 12, 4, 6).fill(0x333333);
+  // cup
+  g.roundRect(x + 6, y + 20, 8, 6, 1).fill(0xffffff);
+  g.rect(x + 7, y + 21, 6, 3).fill(0x6b4226);
+  parent.addChild(g);
+}
+
+function drawSofa(parent: Container, x: number, y: number, color: number) {
+  const g = new Graphics();
+  // seat
+  g.roundRect(x, y, 80, 18, 4).fill(color);
+  g.roundRect(x + 2, y + 2, 76, 14, 3).fill(color + 0x111111);
+  // backrest
+  g.roundRect(x + 4, y - 8, 72, 10, 3).fill(color - 0x111111);
+  // armrests
+  g.roundRect(x - 4, y - 6, 8, 22, 3).fill(color - 0x080808);
+  g.roundRect(x + 76, y - 6, 8, 22, 3).fill(color - 0x080808);
+  // cushion lines
+  g.moveTo(x + 27, y + 3).lineTo(x + 27, y + 15).stroke({ width: 0.8, color: 0x000000, alpha: 0.15 });
+  g.moveTo(x + 53, y + 3).lineTo(x + 53, y + 15).stroke({ width: 0.8, color: 0x000000, alpha: 0.15 });
+  parent.addChild(g);
+}
+
+function drawCoffeeTable(parent: Container, x: number, y: number) {
+  const g = new Graphics();
+  // table top (elliptical)
+  g.ellipse(x + 18, y + 5, 18, 8).fill(0x8b6914);
+  g.ellipse(x + 18, y + 5, 16, 6).fill(0xa0792c);
+  // legs
+  g.rect(x + 6, y + 10, 3, 8).fill(0x654a0e);
+  g.rect(x + 27, y + 10, 3, 8).fill(0x654a0e);
+  // coffee cup
+  g.roundRect(x + 12, y + 1, 5, 4, 1).fill(0xffffff);
+  g.rect(x + 13, y + 2, 3, 2).fill(0x6b4226);
+  // snack plate
+  g.ellipse(x + 24, y + 4, 4, 2.5).fill(0xeeeeee);
+  g.circle(x + 23, y + 3.5, 1.5).fill(0xddaa44);
+  g.circle(x + 25.5, y + 4, 1.5).fill(0xcc8833);
+  parent.addChild(g);
+}
+
+function drawHighTable(parent: Container, x: number, y: number) {
+  const g = new Graphics();
+  // table top
+  g.roundRect(x, y, 36, 14, 2).fill(0x8b6914);
+  g.roundRect(x + 1, y + 1, 34, 12, 1).fill(0xa0792c);
+  // legs
+  g.rect(x + 4, y + 14, 3, 16).fill(0x654a0e);
+  g.rect(x + 29, y + 14, 3, 16).fill(0x654a0e);
+  // crossbar
+  g.rect(x + 6, y + 24, 24, 2).fill(0x654a0e);
+  parent.addChild(g);
+}
+
+function drawVendingMachine(parent: Container, x: number, y: number) {
+  const g = new Graphics();
+  g.roundRect(x, y, 22, 30, 2).fill(0x334455);
+  g.roundRect(x + 1, y + 1, 20, 28, 1).fill(0x445566);
+  // display rows of drinks
+  const drinkColors = [0xff4444, 0x44aaff, 0x44ff44, 0xffaa33, 0xff66aa, 0x8844ff];
+  for (let r = 0; r < 3; r++) {
+    for (let c = 0; c < 3; c++) {
+      g.roundRect(x + 3 + c * 6, y + 3 + r * 7, 4, 5, 1).fill(drinkColors[(r * 3 + c) % drinkColors.length]);
+    }
+  }
+  // dispense slot
+  g.roundRect(x + 4, y + 24, 14, 4, 1).fill(0x222233);
+  parent.addChild(g);
+}
+
 /* ================================================================== */
 /*  Helpers                                                            */
 /* ================================================================== */
@@ -256,6 +365,12 @@ export default function OfficeView({
   const spriteMapRef = useRef<Map<string, number>>(new Map());
   const totalHRef = useRef(600);
   const officeWRef = useRef(MIN_OFFICE_W);
+  const breakRoomRectRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
+  const breakAnimItemsRef = useRef<Array<{
+    sprite: Container; baseX: number; baseY: number;
+  }>>([]);
+  const breakSteamParticlesRef = useRef<Container | null>(null);
+  const breakBubblesRef = useRef<Container[]>([]);
 
   // Latest data via refs (avoids stale closures)
   const dataRef = useRef({ departments, agents, tasks, subAgents, unreadAgentIds });
@@ -273,6 +388,10 @@ export default function OfficeView({
     animItemsRef.current = [];
     roomRectsRef.current = [];
     agentPosRef.current.clear();
+    breakAnimItemsRef.current = [];
+    breakBubblesRef.current = [];
+    breakSteamParticlesRef.current = null;
+    breakRoomRectRef.current = null;
 
     const { departments, agents, tasks, subAgents, unreadAgentIds: unread } = dataRef.current;
 
@@ -303,7 +422,8 @@ export default function OfficeView({
     const roomW = Math.max(baseRoomW, Math.floor(totalRoomSpace / gridCols));
     const roomH = Math.max(170, agentRows * SLOT_H + 44);
     const deptStartY = CEO_ZONE_H + HALLWAY_H;
-    const totalH = deptStartY + gridRows * (roomH + roomGap) + 30;
+    const breakRoomY = deptStartY + gridRows * (roomH + roomGap) + BREAK_ROOM_GAP;
+    const totalH = breakRoomY + BREAK_ROOM_H + 30;
     const roomStartX = (OFFICE_W - (gridCols * roomW + (gridCols - 1) * roomGap)) / 2;
     totalHRef.current = totalH;
 
@@ -448,7 +568,7 @@ export default function OfficeView({
       drawPlant(room, rx + 8, ry + roomH - 14);
       drawPlant(room, rx + roomW - 12, ry + roomH - 14);
 
-      // Agents
+      // Agents (all dept members keep desks; break agents' sprites move to break room)
       const deptAgents = agents.filter(a => a.department_id === dept.id);
       if (deptAgents.length === 0) {
         const et = new Text({
@@ -521,84 +641,89 @@ export default function OfficeView({
         rt.position.set(ax, nameY + 17.5);
         room.addChild(rt);
 
-        // ── Chair FIRST (at hip level, drawn before character so character sits on it) ──
+        // ── Chair (behind character) ──
         drawChair(room, ax, charFeetY - TARGET_CHAR_H * 0.18, theme.accent);
 
-        // ── Character sprite (facing down → toward desk below) ──
-        const spriteNum = spriteMap.get(agent.id) ?? ((hashStr(agent.id) % 12) + 1);
-        const charContainer = new Container();
-        charContainer.position.set(ax, charFeetY);
-        charContainer.eventMode = "static";
-        charContainer.cursor = "pointer";
-        charContainer.on("pointerdown", () => cbRef.current.onSelectAgent(agent));
-
-        const frames: Texture[] = [];
-        for (let f = 1; f <= 3; f++) {
-          const key = `${spriteNum}-D-${f}`;
-          if (textures[key]) frames.push(textures[key]);
-        }
-
-        if (frames.length > 0) {
-          const animSprite = new AnimatedSprite(frames);
-          animSprite.anchor.set(0.5, 1);
-          const scale = TARGET_CHAR_H / animSprite.texture.height;
-          animSprite.scale.set(scale);
-          // ★ Sitting: show static frame (no walking). Only frame 0.
-          animSprite.gotoAndStop(0);
-          if (isOffline) { animSprite.alpha = 0.3; animSprite.tint = 0x888899; }
-          if (isBreak) { animSprite.alpha = 0.65; }
-          charContainer.addChild(animSprite);
-        } else {
-          const fb = new Text({ text: agent.avatar_emoji || "🤖", style: new TextStyle({ fontSize: 24 }) });
-          fb.anchor.set(0.5, 1);
-          charContainer.addChild(fb);
-        }
-        room.addChild(charContainer);
-
-        const particles = new Container();
-        room.addChild(particles);
-        animItemsRef.current.push({
-          sprite: charContainer, status: agent.status,
-          baseX: ax, baseY: charContainer.position.y, particles,
-        });
-
-        // ── Desk with monitor (below character, character faces this) ──
-        drawDesk(room, ax - DESK_W / 2, deskY, isWorking);
-
-        // ── Active task speech bubble (above name tag) ──
-        const activeTask = tasks.find(t => t.assigned_agent_id === agent.id && t.status === "in_progress");
-        if (activeTask) {
-          const txt = activeTask.title.length > 16 ? activeTask.title.slice(0, 16) + "..." : activeTask.title;
-          const bt = new Text({
-            text: `💬 ${txt}`,
-            style: new TextStyle({ fontSize: 6.5, fill: 0x333333, fontFamily: "system-ui, sans-serif", wordWrap: true, wordWrapWidth: 85 }),
-          });
-          bt.anchor.set(0.5, 1);
-          const bw = Math.min(bt.width + 8, 100);
-          const bh = bt.height + 6;
-          const bubbleTop = nameY - bh - 6;
-          const bubbleG = new Graphics();
-          bubbleG.roundRect(ax - bw / 2, bubbleTop, bw, bh, 4).fill(0xffffff);
-          bubbleG.roundRect(ax - bw / 2, bubbleTop, bw, bh, 4)
-            .stroke({ width: 1.2, color: theme.accent, alpha: 0.4 });
-          bubbleG.moveTo(ax - 3, bubbleTop + bh).lineTo(ax, bubbleTop + bh + 4).lineTo(ax + 3, bubbleTop + bh).fill(0xffffff);
-          room.addChild(bubbleG);
-          bt.position.set(ax, bubbleTop + bh - 3);
-          room.addChild(bt);
-        }
-
-        // Status indicators (next to character)
-        if (isOffline) {
-          const zzz = new Text({ text: "💤", style: new TextStyle({ fontSize: 12 }) });
-          zzz.anchor.set(0.5, 0.5);
-          zzz.position.set(ax + 20, charFeetY - TARGET_CHAR_H / 2);
-          room.addChild(zzz);
-        }
+        // Break agents: desk+chair stay, character goes to break room
         if (isBreak) {
-          const coffee = new Text({ text: "☕", style: new TextStyle({ fontSize: 13 }) });
-          coffee.anchor.set(0.5, 0.5);
-          coffee.position.set(ax + 20, charFeetY - TARGET_CHAR_H / 2);
-          room.addChild(coffee);
+          // Desk (on top of empty chair)
+          drawDesk(room, ax - DESK_W / 2, deskY, false);
+          const awayTag = new Text({
+            text: "☕ 휴게실",
+            style: new TextStyle({ fontSize: 7, fill: 0xe8a849, fontFamily: "system-ui, sans-serif" }),
+          });
+          awayTag.anchor.set(0.5, 0.5);
+          awayTag.position.set(ax, charFeetY - TARGET_CHAR_H / 2);
+          room.addChild(awayTag);
+        } else {
+          // ── Character sprite (drawn BEFORE desk so legs hide behind it) ──
+          const spriteNum = spriteMap.get(agent.id) ?? ((hashStr(agent.id) % 12) + 1);
+          const charContainer = new Container();
+          charContainer.position.set(ax, charFeetY);
+          charContainer.eventMode = "static";
+          charContainer.cursor = "pointer";
+          charContainer.on("pointerdown", () => cbRef.current.onSelectAgent(agent));
+
+          const frames: Texture[] = [];
+          for (let f = 1; f <= 3; f++) {
+            const key = `${spriteNum}-D-${f}`;
+            if (textures[key]) frames.push(textures[key]);
+          }
+
+          if (frames.length > 0) {
+            const animSprite = new AnimatedSprite(frames);
+            animSprite.anchor.set(0.5, 1);
+            const scale = TARGET_CHAR_H / animSprite.texture.height;
+            animSprite.scale.set(scale);
+            animSprite.gotoAndStop(0);
+            if (isOffline) { animSprite.alpha = 0.3; animSprite.tint = 0x888899; }
+            charContainer.addChild(animSprite);
+          } else {
+            const fb = new Text({ text: agent.avatar_emoji || "🤖", style: new TextStyle({ fontSize: 24 }) });
+            fb.anchor.set(0.5, 1);
+            charContainer.addChild(fb);
+          }
+          room.addChild(charContainer);
+
+          // ── Desk AFTER character (covers legs) ──
+          drawDesk(room, ax - DESK_W / 2, deskY, isWorking);
+
+          const particles = new Container();
+          room.addChild(particles);
+          animItemsRef.current.push({
+            sprite: charContainer, status: agent.status,
+            baseX: ax, baseY: charContainer.position.y, particles,
+          });
+
+          // ── Active task speech bubble (above name tag) ──
+          const activeTask = tasks.find(t => t.assigned_agent_id === agent.id && t.status === "in_progress");
+          if (activeTask) {
+            const txt = activeTask.title.length > 16 ? activeTask.title.slice(0, 16) + "..." : activeTask.title;
+            const bt = new Text({
+              text: `💬 ${txt}`,
+              style: new TextStyle({ fontSize: 6.5, fill: 0x333333, fontFamily: "system-ui, sans-serif", wordWrap: true, wordWrapWidth: 85 }),
+            });
+            bt.anchor.set(0.5, 1);
+            const bw = Math.min(bt.width + 8, 100);
+            const bh = bt.height + 6;
+            const bubbleTop = nameY - bh - 6;
+            const bubbleG = new Graphics();
+            bubbleG.roundRect(ax - bw / 2, bubbleTop, bw, bh, 4).fill(0xffffff);
+            bubbleG.roundRect(ax - bw / 2, bubbleTop, bw, bh, 4)
+              .stroke({ width: 1.2, color: theme.accent, alpha: 0.4 });
+            bubbleG.moveTo(ax - 3, bubbleTop + bh).lineTo(ax, bubbleTop + bh + 4).lineTo(ax + 3, bubbleTop + bh).fill(0xffffff);
+            room.addChild(bubbleG);
+            bt.position.set(ax, bubbleTop + bh - 3);
+            room.addChild(bt);
+          }
+
+          // Status indicators (next to character)
+          if (isOffline) {
+            const zzz = new Text({ text: "💤", style: new TextStyle({ fontSize: 12 }) });
+            zzz.anchor.set(0.5, 0.5);
+            zzz.position.set(ax + 20, charFeetY - TARGET_CHAR_H / 2);
+            room.addChild(zzz);
+          }
         }
 
         // Sub-agents (beside the desk)
@@ -609,7 +734,7 @@ export default function OfficeView({
           const tg = new Graphics();
           tg.roundRect(sx - 10, sy + DESK_H + 2, 20, 10, 1).fill(0x777788);
           room.addChild(tg);
-          const miniNum = ((charHash + si + 1) % 12) + 1;
+          const miniNum = ((hashStr(agent.id) + si + 1) % 12) + 1;
           const miniKey = `${miniNum}-D-1`;
           if (textures[miniKey]) {
             const ms = new Sprite(textures[miniKey]);
@@ -634,6 +759,175 @@ export default function OfficeView({
 
       app.stage.addChild(room);
     });
+
+    // ── BREAK ROOM ──
+    const breakAgents = agents.filter(a => a.status === 'break');
+    breakAnimItemsRef.current = [];
+    breakBubblesRef.current = [];
+
+    const breakRoom = new Container();
+    const brx = 4, bry = breakRoomY, brw = OFFICE_W - 8, brh = BREAK_ROOM_H;
+    breakRoomRectRef.current = { x: brx, y: bry, w: brw, h: brh };
+
+    // Floor
+    const brFloor = new Graphics();
+    drawTiledFloor(brFloor, brx, bry, brw, brh, BREAK_THEME.floor1, BREAK_THEME.floor2);
+    breakRoom.addChild(brFloor);
+
+    // Wall border
+    const brBorder = new Graphics();
+    brBorder.roundRect(brx, bry, brw, brh, 3)
+      .stroke({ width: 2, color: BREAK_THEME.wall });
+    brBorder.roundRect(brx - 1, bry - 1, brw + 2, brh + 2, 4)
+      .stroke({ width: 1, color: BREAK_THEME.accent, alpha: 0.25 });
+    breakRoom.addChild(brBorder);
+
+    // Sign
+    const brSignW = 84;
+    const brSignBg = new Graphics();
+    brSignBg.roundRect(brx + brw / 2 - brSignW / 2, bry - 4, brSignW, 18, 4).fill(BREAK_THEME.accent);
+    breakRoom.addChild(brSignBg);
+    const brSignTxt = new Text({
+      text: "☕ 휴게실",
+      style: new TextStyle({ fontSize: 9, fill: 0xffffff, fontWeight: "bold", fontFamily: "system-ui, sans-serif" }),
+    });
+    brSignTxt.anchor.set(0.5, 0.5);
+    brSignTxt.position.set(brx + brw / 2, bry + 5);
+    breakRoom.addChild(brSignTxt);
+
+    // Furniture layout (relative to room left)
+    const furnitureBaseX = brx + 16;
+    drawCoffeeMachine(breakRoom, furnitureBaseX, bry + 20);
+    drawPlant(breakRoom, furnitureBaseX + 30, bry + 38);
+    drawSofa(breakRoom, furnitureBaseX + 50, bry + 56, 0x8b4513);
+    drawCoffeeTable(breakRoom, furnitureBaseX + 140, bry + 58);
+
+    // Right side furniture (from room right edge)
+    const furnitureRightX = brx + brw - 16;
+    drawVendingMachine(breakRoom, furnitureRightX - 26, bry + 20);
+    drawPlant(breakRoom, furnitureRightX - 36, bry + 38);
+    drawSofa(breakRoom, furnitureRightX - 120, bry + 56, 0x6b3a2a);
+    drawHighTable(breakRoom, furnitureRightX - 170, bry + 24);
+
+    // Steam particles container (for coffee machine)
+    const steamContainer = new Container();
+    breakRoom.addChild(steamContainer);
+    breakSteamParticlesRef.current = steamContainer;
+
+    // Break agents placement
+    breakAgents.forEach((agent, idx) => {
+      const spot = BREAK_SPOTS[idx % BREAK_SPOTS.length];
+      const seed = hashStr(agent.id);
+      const offsetX = ((seed % 7) - 3);
+      const offsetY = ((seed % 5) - 2) * 0.6;
+
+      // Resolve x: positive = from room left, negative = from furnitureRightX (brx+brw-16)
+      const spotX = spot.x >= 0
+        ? brx + spot.x + offsetX
+        : (brx + brw - 16) + spot.x + offsetX;
+      const spotY = bry + spot.y + offsetY;
+
+      agentPosRef.current.set(agent.id, { x: spotX, y: spotY });
+
+      // Character sprite
+      const spriteNum = spriteMap.get(agent.id) ?? ((seed % 12) + 1);
+      const charContainer = new Container();
+      charContainer.position.set(spotX, spotY);
+      charContainer.eventMode = "static";
+      charContainer.cursor = "pointer";
+      charContainer.on("pointerdown", () => cbRef.current.onSelectAgent(agent));
+
+      const dirKey = `${spriteNum}-${spot.dir}-1`;
+      const fallbackKey = `${spriteNum}-D-1`;
+      const tex = textures[dirKey] || textures[fallbackKey];
+
+      if (tex) {
+        const sp = new Sprite(tex);
+        sp.anchor.set(0.5, 1);
+        const scale = (TARGET_CHAR_H * 0.85) / sp.texture.height;
+        sp.scale.set(scale);
+        charContainer.addChild(sp);
+      } else {
+        const fb = new Text({ text: agent.avatar_emoji || "🤖", style: new TextStyle({ fontSize: 20 }) });
+        fb.anchor.set(0.5, 1);
+        charContainer.addChild(fb);
+      }
+      breakRoom.addChild(charContainer);
+
+      breakAnimItemsRef.current.push({
+        sprite: charContainer,
+        baseX: spotX,
+        baseY: spotY,
+      });
+
+      // Coffee emoji next to character
+      const coffeeEmoji = new Text({ text: "☕", style: new TextStyle({ fontSize: 10 }) });
+      coffeeEmoji.anchor.set(0.5, 0.5);
+      coffeeEmoji.position.set(spotX + 14, spotY - 10);
+      breakRoom.addChild(coffeeEmoji);
+
+      // Small name tag
+      const nameTag = new Text({
+        text: agent.name_ko || agent.name,
+        style: new TextStyle({ fontSize: 6, fill: 0xffffff, fontFamily: "system-ui, sans-serif" }),
+      });
+      nameTag.anchor.set(0.5, 0);
+      const ntW = nameTag.width + 4;
+      const ntBg = new Graphics();
+      ntBg.roundRect(spotX - ntW / 2, spotY + 2, ntW, 9, 2).fill({ color: 0x000000, alpha: 0.4 });
+      breakRoom.addChild(ntBg);
+      nameTag.position.set(spotX, spotY + 3);
+      breakRoom.addChild(nameTag);
+    });
+
+    // Chat bubbles (1-2 at a time, rotating)
+    if (breakAgents.length > 0) {
+      const phase = Math.floor(Date.now() / 4000);
+      const speakerCount = Math.min(2, breakAgents.length);
+      for (let si = 0; si < speakerCount; si++) {
+        const speakerIdx = (phase + si) % breakAgents.length;
+        const agent = breakAgents[speakerIdx];
+        const spot = BREAK_SPOTS[speakerIdx % BREAK_SPOTS.length];
+        const seed = hashStr(agent.id);
+        const spotX = spot.x >= 0
+          ? brx + spot.x + ((seed % 7) - 3)
+          : (brx + brw - 16) + spot.x + ((seed % 7) - 3);
+        const spotY = bry + spot.y + ((seed % 5) - 2) * 0.6;
+
+        const msg = BREAK_CHAT_MESSAGES[(seed + phase) % BREAK_CHAT_MESSAGES.length];
+        const bubbleText = new Text({
+          text: msg,
+          style: new TextStyle({ fontSize: 7, fill: 0x333333, fontFamily: "system-ui, sans-serif" }),
+        });
+        bubbleText.anchor.set(0.5, 1);
+        const bw = bubbleText.width + 10;
+        const bh = bubbleText.height + 6;
+        const bubbleTop = spotY - TARGET_CHAR_H * 0.85 - bh - 4;
+
+        const bubbleG = new Graphics();
+        bubbleG.roundRect(spotX - bw / 2, bubbleTop, bw, bh, 4).fill(0xfff8e8);
+        bubbleG.roundRect(spotX - bw / 2, bubbleTop, bw, bh, 4)
+          .stroke({ width: 1.2, color: BREAK_THEME.accent, alpha: 0.5 });
+        // Tail
+        bubbleG.moveTo(spotX - 3, bubbleTop + bh).lineTo(spotX, bubbleTop + bh + 4).lineTo(spotX + 3, bubbleTop + bh).fill(0xfff8e8);
+        breakRoom.addChild(bubbleG);
+        bubbleText.position.set(spotX, bubbleTop + bh - 3);
+        breakRoom.addChild(bubbleText);
+
+        // Store for alpha animation
+        const bubbleContainer = new Container();
+        bubbleContainer.addChild(bubbleG);
+        // Re-parent text into container for animation
+        breakRoom.removeChild(bubbleG);
+        breakRoom.removeChild(bubbleText);
+        bubbleContainer.addChild(bubbleG);
+        bubbleContainer.addChild(bubbleText);
+        breakRoom.addChild(bubbleContainer);
+        breakBubblesRef.current.push(bubbleContainer);
+      }
+    }
+
+    app.stage.addChild(breakRoom);
 
     // ── DELIVERY LAYER ──
     const dlLayer = new Container();
@@ -753,6 +1047,10 @@ export default function OfficeView({
           const key = `${i}-D-${f}`;
           loads.push(Assets.load<Texture>(`/sprites/${key}.png`).then(t => { textures[key] = t; }).catch(() => {}));
         }
+        for (const dir of ['L', 'R']) {
+          const key = `${i}-${dir}-1`;
+          loads.push(Assets.load<Texture>(`/sprites/${key}.png`).then(t => { textures[key] = t; }).catch(() => {}));
+        }
       }
       loads.push(Assets.load<Texture>("/sprites/ceo-lobster.png").then(t => { textures["ceo"] = t; }).catch(() => {}));
       await Promise.all(loads);
@@ -796,12 +1094,22 @@ export default function OfficeView({
         if (hl) {
           hl.clear();
           const cx = ceoPosRef.current.x, cy = ceoPosRef.current.y;
+          let highlighted = false;
           for (const r of roomRectsRef.current) {
             if (cx >= r.x && cx <= r.x + r.w && cy >= r.y - 10 && cy <= r.y + r.h) {
               const theme = DEPT_THEME[r.dept.id] || DEPT_THEME.dev;
               hl.roundRect(r.x - 2, r.y - 2, r.w + 4, r.h + 4, 5)
                 .stroke({ width: 3, color: theme.accent, alpha: 0.5 + Math.sin(tick * 0.08) * 0.2 });
+              highlighted = true;
               break;
+            }
+          }
+          // Break room highlight
+          if (!highlighted) {
+            const br = breakRoomRectRef.current;
+            if (br && cx >= br.x && cx <= br.x + br.w && cy >= br.y - 10 && cy <= br.y + br.h) {
+              hl.roundRect(br.x - 2, br.y - 2, br.w + 4, br.h + 4, 5)
+                .stroke({ width: 3, color: BREAK_THEME.accent, alpha: 0.5 + Math.sin(tick * 0.08) * 0.2 });
             }
           }
         }
@@ -832,6 +1140,43 @@ export default function OfficeView({
               if (p._life > 35) { particles.removeChild(p); p.destroy(); }
             }
           }
+        }
+
+        // Break room agent sway animation
+        for (const { sprite, baseX, baseY } of breakAnimItemsRef.current) {
+          const seed = hashStr((sprite as any)._name || `${baseX}`);
+          sprite.position.x = baseX + Math.sin(tick * 0.02 + seed) * 1.5;
+          sprite.position.y = baseY + Math.sin(tick * 0.03) * 0.8;
+        }
+
+        // Coffee steam particles
+        const steamC = breakSteamParticlesRef.current;
+        if (steamC) {
+          if (tick % 20 === 0) {
+            const p = new Graphics();
+            p.circle(0, 0, 1.5 + Math.random()).fill({ color: 0xffffff, alpha: 0.5 });
+            const br = breakRoomRectRef.current;
+            if (br) {
+              p.position.set(br.x + 26, br.y + 18);
+              (p as any)._vy = -0.3 - Math.random() * 0.2;
+              (p as any)._life = 0;
+              steamC.addChild(p);
+            }
+          }
+          for (let i = steamC.children.length - 1; i >= 0; i--) {
+            const p = steamC.children[i] as any;
+            p._life++;
+            p.position.y += p._vy ?? -0.3;
+            p.position.x += Math.sin(p._life * 0.15) * 0.3;
+            p.alpha = Math.max(0, 0.5 - p._life * 0.016);
+            if (p._life > 30) { steamC.removeChild(p); p.destroy(); }
+          }
+        }
+
+        // Break room chat bubble alpha pulsing
+        for (const bubble of breakBubblesRef.current) {
+          const phase = tick * 0.05;
+          bubble.alpha = 0.7 + Math.sin(phase) * 0.3;
         }
 
         // Delivery animations

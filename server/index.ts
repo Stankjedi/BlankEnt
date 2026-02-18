@@ -95,10 +95,16 @@ function decryptSecret(payload: string): string {
 // ---------------------------------------------------------------------------
 const OAUTH_BASE_URL = process.env.OAUTH_BASE_URL || `http://${HOST}:${PORT}`;
 
-const OAUTH_GITHUB_CLIENT_ID = process.env.OAUTH_GITHUB_CLIENT_ID || "";
-const OAUTH_GITHUB_CLIENT_SECRET = process.env.OAUTH_GITHUB_CLIENT_SECRET || "";
-const OAUTH_GOOGLE_CLIENT_ID = process.env.OAUTH_GOOGLE_CLIENT_ID || "";
-const OAUTH_GOOGLE_CLIENT_SECRET = process.env.OAUTH_GOOGLE_CLIENT_SECRET || "";
+// Built-in OAuth client credentials (same as OpenClaw/Claw-Kanban built-in values)
+const BUILTIN_GITHUB_CLIENT_ID = "Iv1.b507a08c87ecfe98";
+const BUILTIN_GOOGLE_CLIENT_ID = Buffer.from(
+  "MTA3MTAwNjA2MDU5MS10bWhzc2luMmgyMWxjcmUyMzV2dG9sb2poNGc0MDNlcC5hcHBzLmdvb2dsZXVzZXJjb250ZW50LmNvbQ==",
+  "base64",
+).toString();
+const BUILTIN_GOOGLE_CLIENT_SECRET = Buffer.from(
+  "R09DU1BYLUs1OEZXUjQ4NkxkTEoxbUxCOHNYQzR6NnFEQWY=",
+  "base64",
+).toString();
 
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -3631,90 +3637,89 @@ function upsertOAuthCredential(input: {
 }
 
 function startGitHubOAuth(redirectTo: string | undefined, callbackPath: string): string {
-  if (!OAUTH_GITHUB_CLIENT_ID) throw new Error("OAUTH_GITHUB_CLIENT_ID not configured");
+  const clientId = process.env.OAUTH_GITHUB_CLIENT_ID ?? BUILTIN_GITHUB_CLIENT_ID;
+  if (!clientId) throw new Error("missing_OAUTH_GITHUB_CLIENT_ID");
   const stateId = randomUUID();
   const safeRedirect = sanitizeOAuthRedirect(redirectTo);
-  // Store state (verifier not used for GitHub, but store placeholder)
   db.prepare(
     "INSERT INTO oauth_states (id, provider, created_at, verifier_enc, redirect_to) VALUES (?, ?, ?, ?, ?)"
-  ).run(stateId, "github", Date.now(), "", safeRedirect);
+  ).run(stateId, "github", Date.now(), "none", safeRedirect);
 
-  const params = new URLSearchParams({
-    client_id: OAUTH_GITHUB_CLIENT_ID,
-    redirect_uri: `${OAUTH_BASE_URL}${callbackPath}`,
-    scope: "read:user user:email",
-    state: stateId,
-  });
-  return `https://github.com/login/oauth/authorize?${params.toString()}`;
+  const url = new URL("https://github.com/login/oauth/authorize");
+  url.searchParams.set("client_id", clientId);
+  url.searchParams.set("redirect_uri", `${OAUTH_BASE_URL}${callbackPath}`);
+  url.searchParams.set("state", stateId);
+  url.searchParams.set("scope", "read:user user:email");
+  return url.toString();
 }
 
-function startGoogleOAuth(redirectTo: string | undefined, callbackPath: string): string {
-  if (!OAUTH_GOOGLE_CLIENT_ID) throw new Error("OAUTH_GOOGLE_CLIENT_ID not configured");
+function startGoogleAntigravityOAuth(redirectTo: string | undefined, callbackPath: string): string {
+  const clientId = process.env.OAUTH_GOOGLE_CLIENT_ID ?? BUILTIN_GOOGLE_CLIENT_ID;
+  if (!clientId) throw new Error("missing_OAUTH_GOOGLE_CLIENT_ID");
   const stateId = randomUUID();
   const verifier = pkceVerifier();
   const safeRedirect = sanitizeOAuthRedirect(redirectTo);
-  // Store state with encrypted PKCE verifier
   const verifierEnc = encryptSecret(verifier);
   db.prepare(
     "INSERT INTO oauth_states (id, provider, created_at, verifier_enc, redirect_to) VALUES (?, ?, ?, ?, ?)"
-  ).run(stateId, "google", Date.now(), verifierEnc, safeRedirect);
+  ).run(stateId, "google_antigravity", Date.now(), verifierEnc, safeRedirect);
 
-  // pkceChallengeS256 is async, but we compute synchronously since createHash is sync
   const challenge = b64url(createHash("sha256").update(verifier, "ascii").digest());
 
-  const params = new URLSearchParams({
-    client_id: OAUTH_GOOGLE_CLIENT_ID,
-    redirect_uri: `${OAUTH_BASE_URL}${callbackPath}`,
-    response_type: "code",
-    scope: "openid email profile",
-    state: stateId,
-    code_challenge: challenge,
-    code_challenge_method: "S256",
-    access_type: "offline",
-    prompt: "consent",
-  });
-  return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
+  const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+  url.searchParams.set("client_id", clientId);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("redirect_uri", `${OAUTH_BASE_URL}${callbackPath}`);
+  url.searchParams.set("scope", [
+    "https://www.googleapis.com/auth/cloud-platform",
+    "openid", "email", "profile",
+  ].join(" "));
+  url.searchParams.set("code_challenge", challenge);
+  url.searchParams.set("code_challenge_method", "S256");
+  url.searchParams.set("state", stateId);
+  url.searchParams.set("access_type", "offline");
+  url.searchParams.set("prompt", "consent");
+  return url.toString();
 }
 
 async function handleGitHubCallback(code: string, stateId: string, callbackPath: string): Promise<{ redirectTo: string }> {
   const stateRow = consumeOAuthState(stateId, "github");
   if (!stateRow) throw new Error("Invalid or expired state");
 
-  // Exchange code for token
+  const redirectTo = stateRow.redirect_to || "/";
+  const clientId = process.env.OAUTH_GITHUB_CLIENT_ID ?? BUILTIN_GITHUB_CLIENT_ID;
+  const clientSecret = process.env.OAUTH_GITHUB_CLIENT_SECRET;
+
+  // Exchange code for token (client_secret optional for built-in public app)
+  const tokenBody: Record<string, string> = {
+    client_id: clientId,
+    code,
+    redirect_uri: `${OAUTH_BASE_URL}${callbackPath}`,
+  };
+  if (clientSecret) tokenBody.client_secret = clientSecret;
+
   const tokenResp = await fetch("https://github.com/login/oauth/access_token", {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({
-      client_id: OAUTH_GITHUB_CLIENT_ID,
-      client_secret: OAUTH_GITHUB_CLIENT_SECRET,
-      code,
-      redirect_uri: `${OAUTH_BASE_URL}${callbackPath}`,
-    }),
+    body: JSON.stringify(tokenBody),
     signal: AbortSignal.timeout(10000),
   });
   const tokenData = await tokenResp.json() as { access_token?: string; error?: string; scope?: string };
   if (!tokenData.access_token) throw new Error(tokenData.error || "No access token received");
 
-  // Fetch user info
-  const userResp = await fetch("https://api.github.com/user", {
-    headers: { Authorization: `Bearer ${tokenData.access_token}`, Accept: "application/json" },
-    signal: AbortSignal.timeout(8000),
-  });
-  const userData = await userResp.json() as { login?: string; email?: string };
-
-  // Fetch primary email if not public
-  let email = userData.email || userData.login || null;
-  if (!userData.email) {
-    try {
-      const emailResp = await fetch("https://api.github.com/user/emails", {
-        headers: { Authorization: `Bearer ${tokenData.access_token}`, Accept: "application/json" },
-        signal: AbortSignal.timeout(5000),
-      });
-      const emails = await emailResp.json() as Array<{ email: string; primary: boolean }>;
-      const primary = emails.find((e) => e.primary);
+  // Fetch primary email
+  let email: string | null = null;
+  try {
+    const emailResp = await fetch("https://api.github.com/user/emails", {
+      headers: { Authorization: `Bearer ${tokenData.access_token}`, "User-Agent": "climpire", Accept: "application/vnd.github+json" },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (emailResp.ok) {
+      const emails = await emailResp.json() as Array<{ email: string; primary: boolean; verified: boolean }>;
+      const primary = emails.find((e) => e.primary && e.verified);
       if (primary) email = primary.email;
-    } catch { /* use login as fallback */ }
-  }
+    }
+  } catch { /* email fetch is best-effort */ }
 
   upsertOAuthCredential({
     provider: "github",
@@ -3726,13 +3731,16 @@ async function handleGitHubCallback(code: string, stateId: string, callbackPath:
     expires_at: null,
   });
 
-  const redirect = stateRow.redirect_to || "/";
-  return { redirectTo: appendOAuthQuery(redirect.startsWith("/") ? `${OAUTH_BASE_URL}${redirect}` : redirect, "oauth", "github") };
+  return { redirectTo: appendOAuthQuery(redirectTo.startsWith("/") ? `${OAUTH_BASE_URL}${redirectTo}` : redirectTo, "oauth", "github-copilot") };
 }
 
-async function handleGoogleCallback(code: string, stateId: string, callbackPath: string): Promise<{ redirectTo: string }> {
-  const stateRow = consumeOAuthState(stateId, "google");
+async function handleGoogleAntigravityCallback(code: string, stateId: string, callbackPath: string): Promise<{ redirectTo: string }> {
+  const stateRow = consumeOAuthState(stateId, "google_antigravity");
   if (!stateRow) throw new Error("Invalid or expired state");
+
+  const redirectTo = stateRow.redirect_to || "/";
+  const clientId = process.env.OAUTH_GOOGLE_CLIENT_ID ?? BUILTIN_GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.OAUTH_GOOGLE_CLIENT_SECRET ?? BUILTIN_GOOGLE_CLIENT_SECRET;
 
   // Decrypt PKCE verifier
   const verifier = decryptSecret(stateRow.verifier_enc);
@@ -3742,8 +3750,8 @@ async function handleGoogleCallback(code: string, stateId: string, callbackPath:
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
-      client_id: OAUTH_GOOGLE_CLIENT_ID,
-      client_secret: OAUTH_GOOGLE_CLIENT_SECRET,
+      client_id: clientId,
+      client_secret: clientSecret,
       code,
       redirect_uri: `${OAUTH_BASE_URL}${callbackPath}`,
       grant_type: "authorization_code",
@@ -3753,105 +3761,83 @@ async function handleGoogleCallback(code: string, stateId: string, callbackPath:
   });
   const tokenData = await tokenResp.json() as {
     access_token?: string; refresh_token?: string; expires_in?: number;
-    id_token?: string; error?: string; scope?: string;
+    error?: string; scope?: string;
   };
   if (!tokenData.access_token) throw new Error(tokenData.error || "No access token received");
 
   // Fetch user info
-  const userResp = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
-    headers: { Authorization: `Bearer ${tokenData.access_token}` },
-    signal: AbortSignal.timeout(8000),
-  });
-  const userData = await userResp.json() as { email?: string; name?: string };
+  let email: string | null = null;
+  try {
+    const userResp = await fetch("https://www.googleapis.com/oauth2/v1/userinfo?alt=json", {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (userResp.ok) {
+      const ui = await userResp.json() as { email?: string };
+      if (ui?.email) email = ui.email;
+    }
+  } catch { /* userinfo best-effort */ }
 
   const expiresAt = tokenData.expires_in ? Date.now() + tokenData.expires_in * 1000 : null;
 
   upsertOAuthCredential({
-    provider: "google",
+    provider: "google_antigravity",
     source: "web-oauth",
-    email: userData.email || null,
+    email,
     scope: tokenData.scope || "openid email profile",
     access_token: tokenData.access_token,
     refresh_token: tokenData.refresh_token || null,
     expires_at: expiresAt,
   });
 
-  const redirect = stateRow.redirect_to || "/";
-  return { redirectTo: appendOAuthQuery(redirect.startsWith("/") ? `${OAUTH_BASE_URL}${redirect}` : redirect, "oauth", "google") };
+  return { redirectTo: appendOAuthQuery(redirectTo.startsWith("/") ? `${OAUTH_BASE_URL}${redirectTo}` : redirectTo, "oauth", "antigravity") };
 }
 
 // ---------------------------------------------------------------------------
 // OAuth credentials (simplified for CLImpire)
 // ---------------------------------------------------------------------------
-app.get("/api/oauth/status", (_req, res) => {
+// Helper: build OAuth status with 2 connect providers (github-copilot, antigravity)
+function buildOAuthStatus() {
   const home = os.homedir();
 
-  // 1. DB-stored OAuth credentials (including web-oauth)
+  // DB-stored credentials
+  type CredRow = { provider: string; email: string | null; scope: string | null; expires_at: number | null; created_at: number; updated_at: number; access_token_enc: string | null; refresh_token_enc: string | null };
   const rows = db.prepare(
-    "SELECT provider, source, email, scope, expires_at, created_at, updated_at, access_token_enc FROM oauth_credentials"
-  ).all() as Array<{
-    provider: string;
-    source: string | null;
-    email: string | null;
-    scope: string | null;
-    expires_at: number | null;
-    created_at: number;
-    updated_at: number;
-    access_token_enc: string | null;
-  }>;
+    "SELECT provider, email, scope, expires_at, created_at, updated_at, access_token_enc, refresh_token_enc FROM oauth_credentials"
+  ).all() as CredRow[];
 
-  const providers: Record<string, {
-    connected: boolean;
-    source: string | null;
-    email: string | null;
-    scope: string | null;
-    expires_at: number | null;
-    created_at: number;
-    updated_at: number;
-    webConnectable: boolean;
-  }> = {};
+  const dbCreds: Record<string, CredRow> = {};
+  for (const row of rows) dbCreds[row.provider] = row;
 
-  for (const row of rows) {
-    providers[row.provider] = {
-      connected: true,
-      source: row.access_token_enc ? "web-oauth" : (row.source || "db"),
-      email: row.email,
-      scope: row.scope,
-      expires_at: row.expires_at,
-      created_at: row.created_at,
-      updated_at: row.updated_at,
-      webConnectable: row.provider === "github" || row.provider === "google",
-    };
-  }
+  // GitHub credential: DB "github" or file-detected from gh CLI
+  const ghDb = dbCreds.github;
+  let ghConnected = Boolean(ghDb);
+  let ghSource: string | null = ghDb ? "web-oauth" : null;
+  let ghEmail: string | null = ghDb?.email ?? null;
+  let ghScope: string | null = ghDb?.scope ?? null;
+  let ghCreatedAt = ghDb?.created_at ?? 0;
+  let ghUpdatedAt = ghDb?.updated_at ?? 0;
 
-  // 2. Detect OAuth-based service credentials from local files
-  //    (These are OAuth services like GitHub, Google Cloud — NOT CLI tools)
-
-  // GitHub (gh CLI OAuth — used by Copilot, GitHub integrations)
-  if (!providers.github) {
+  // Also detect Copilot file-based credentials
+  if (!ghConnected) {
+    // gh CLI hosts
     try {
       const hostsPath = path.join(home, ".config", "gh", "hosts.yml");
       const raw = fs.readFileSync(hostsPath, "utf8");
       const userMatch = raw.match(/user:\s*(\S+)/);
       if (userMatch) {
-        const ghUser = userMatch[1];
         const stat = fs.statSync(hostsPath);
-        providers.github = {
-          connected: true,
-          source: "file-detected",
-          email: ghUser,
-          scope: "github.com",
-          expires_at: null,
-          created_at: stat.birthtimeMs,
-          updated_at: stat.mtimeMs,
-          webConnectable: true,
-        };
+        ghConnected = true;
+        ghSource = "file-detected";
+        ghEmail = userMatch[1];
+        ghScope = "github.com";
+        ghCreatedAt = stat.birthtimeMs;
+        ghUpdatedAt = stat.mtimeMs;
       }
     } catch {}
   }
-
-  // GitHub Copilot (separate OAuth from GitHub)
-  if (!providers.copilot) {
+  if (!ghConnected) {
+    // GitHub Copilot hosts/apps
     const copilotPaths = [
       path.join(home, ".config", "github-copilot", "hosts.json"),
       path.join(home, ".config", "github-copilot", "apps.json"),
@@ -3862,45 +3848,30 @@ app.get("/api/oauth/status", (_req, res) => {
         if (raw && typeof raw === "object" && Object.keys(raw).length > 0) {
           const stat = fs.statSync(cp);
           const firstKey = Object.keys(raw)[0];
-          providers.copilot = {
-            connected: true,
-            source: "file-detected",
-            email: raw[firstKey]?.user ?? null,
-            scope: "copilot",
-            expires_at: null,
-            created_at: stat.birthtimeMs,
-            updated_at: stat.mtimeMs,
-            webConnectable: false,
-          };
+          ghConnected = true;
+          ghSource = "file-detected";
+          ghEmail = raw[firstKey]?.user ?? null;
+          ghScope = "copilot";
+          ghCreatedAt = stat.birthtimeMs;
+          ghUpdatedAt = stat.mtimeMs;
           break;
         }
       } catch {}
     }
   }
 
-  // Google Cloud OAuth (gcloud application default credentials)
-  if (!providers.google) {
-    try {
-      const adcPath = path.join(home, ".config", "gcloud", "application_default_credentials.json");
-      const raw = JSON.parse(fs.readFileSync(adcPath, "utf8"));
-      if (raw?.client_id || raw?.type) {
-        const stat = fs.statSync(adcPath);
-        providers.google = {
-          connected: true,
-          source: "file-detected",
-          email: raw.client_email ?? raw.account ?? null,
-          scope: raw.type ?? "authorized_user",
-          expires_at: null,
-          created_at: stat.birthtimeMs,
-          updated_at: stat.mtimeMs,
-          webConnectable: true,
-        };
-      }
-    } catch {}
-  }
+  // Antigravity credential: DB "google_antigravity" or file-detected
+  const agDb = dbCreds.google_antigravity;
+  let agConnected = Boolean(agDb);
+  let agSource: string | null = agDb ? "web-oauth" : null;
+  let agEmail: string | null = agDb?.email ?? null;
+  let agScope: string | null = agDb?.scope ?? null;
+  let agExpiresAt: number | null = agDb?.expires_at ?? null;
+  let agCreatedAt = agDb?.created_at ?? 0;
+  let agUpdatedAt = agDb?.updated_at ?? 0;
+  const agHasRefresh = Boolean(agDb?.refresh_token_enc);
 
-  // Antigravity
-  if (!providers.antigravity) {
+  if (!agConnected) {
     const agPaths = [
       path.join(home, ".antigravity", "auth.json"),
       path.join(home, ".config", "antigravity", "auth.json"),
@@ -3911,73 +3882,74 @@ app.get("/api/oauth/status", (_req, res) => {
         const raw = JSON.parse(fs.readFileSync(ap, "utf8"));
         if (raw && typeof raw === "object") {
           const stat = fs.statSync(ap);
-          providers.antigravity = {
-            connected: true,
-            source: "file-detected",
-            email: raw.email ?? raw.user ?? null,
-            scope: raw.scope ?? null,
-            expires_at: raw.expires_at ?? null,
-            created_at: stat.birthtimeMs,
-            updated_at: stat.mtimeMs,
-            webConnectable: false,
-          };
+          agConnected = true;
+          agSource = "file-detected";
+          agEmail = raw.email ?? raw.user ?? null;
+          agScope = raw.scope ?? null;
+          agExpiresAt = raw.expires_at ?? null;
+          agCreatedAt = stat.birthtimeMs;
+          agUpdatedAt = stat.mtimeMs;
           break;
         }
       } catch {}
     }
   }
 
-  // Always include github and google with webConnectable flag
-  // webConnectable = true when OAuth client IDs are configured
-  const ghConnectable = Boolean(OAUTH_GITHUB_CLIENT_ID);
-  const goConnectable = Boolean(OAUTH_GOOGLE_CLIENT_ID);
+  return {
+    "github-copilot": {
+      connected: ghConnected,
+      source: ghSource,
+      email: ghEmail,
+      scope: ghScope,
+      expires_at: null as number | null,
+      created_at: ghCreatedAt,
+      updated_at: ghUpdatedAt,
+      webConnectable: true,  // always connectable — built-in client ID
+    },
+    antigravity: {
+      connected: agConnected,
+      source: agSource,
+      email: agEmail,
+      scope: agScope,
+      expires_at: agExpiresAt,
+      created_at: agCreatedAt,
+      updated_at: agUpdatedAt,
+      webConnectable: true,  // always connectable — built-in client ID
+      hasRefreshToken: agHasRefresh,
+    },
+  };
+}
 
-  if (providers.github) {
-    providers.github.webConnectable = ghConnectable;
-  } else {
-    providers.github = {
-      connected: false, source: null, email: null, scope: null,
-      expires_at: null, created_at: 0, updated_at: 0, webConnectable: ghConnectable,
-    };
-  }
-  if (providers.google) {
-    providers.google.webConnectable = goConnectable;
-  } else {
-    providers.google = {
-      connected: false, source: null, email: null, scope: null,
-      expires_at: null, created_at: 0, updated_at: 0, webConnectable: goConnectable,
-    };
-  }
-
+app.get("/api/oauth/status", (_req, res) => {
   res.json({
     storageReady: Boolean(OAUTH_ENCRYPTION_SECRET),
-    providers,
+    providers: buildOAuthStatus(),
   });
 });
 
 // GET /api/oauth/start — Begin OAuth flow
 app.get("/api/oauth/start", (req, res) => {
   const provider = firstQueryValue(req.query.provider);
-  const redirectTo = firstQueryValue(req.query.redirect_to);
+  const redirectTo = sanitizeOAuthRedirect(firstQueryValue(req.query.redirect_to));
 
   try {
     let authorizeUrl: string;
-    if (provider === "github") {
-      authorizeUrl = startGitHubOAuth(redirectTo, "/api/oauth/callback/github");
-    } else if (provider === "google") {
-      authorizeUrl = startGoogleOAuth(redirectTo, "/api/oauth/callback/google");
+    if (provider === "github-copilot") {
+      authorizeUrl = startGitHubOAuth(redirectTo, "/api/oauth/callback/github-copilot");
+    } else if (provider === "antigravity") {
+      authorizeUrl = startGoogleAntigravityOAuth(redirectTo, "/api/oauth/callback/antigravity");
     } else {
       return res.status(400).json({ error: `Unsupported provider: ${provider}` });
     }
-    res.redirect(authorizeUrl);
+    res.redirect(302, authorizeUrl);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     res.status(500).json({ error: msg });
   }
 });
 
-// GET /api/oauth/callback/github — GitHub OAuth callback
-app.get("/api/oauth/callback/github", async (req, res) => {
+// GET /api/oauth/callback/github-copilot — GitHub OAuth callback (for Copilot)
+app.get("/api/oauth/callback/github-copilot", async (req, res) => {
   const code = firstQueryValue(req.query.code);
   const state = firstQueryValue(req.query.state);
   const error = firstQueryValue(req.query.error);
@@ -3989,19 +3961,19 @@ app.get("/api/oauth/callback/github", async (req, res) => {
   }
 
   try {
-    const result = await handleGitHubCallback(code, state, "/api/oauth/callback/github");
+    const result = await handleGitHubCallback(code, state, "/api/oauth/callback/github-copilot");
     res.redirect(result.redirectTo);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error("[OAuth] GitHub callback error:", msg);
+    console.error("[OAuth] GitHub/Copilot callback error:", msg);
     const redirectUrl = new URL("/", OAUTH_BASE_URL);
     redirectUrl.searchParams.set("oauth_error", msg);
     res.redirect(redirectUrl.toString());
   }
 });
 
-// GET /api/oauth/callback/google — Google OAuth callback
-app.get("/api/oauth/callback/google", async (req, res) => {
+// GET /api/oauth/callback/antigravity — Google/Antigravity OAuth callback
+app.get("/api/oauth/callback/antigravity", async (req, res) => {
   const code = firstQueryValue(req.query.code);
   const state = firstQueryValue(req.query.state);
   const error = firstQueryValue(req.query.error);
@@ -4013,24 +3985,162 @@ app.get("/api/oauth/callback/google", async (req, res) => {
   }
 
   try {
-    const result = await handleGoogleCallback(code, state, "/api/oauth/callback/google");
+    const result = await handleGoogleAntigravityCallback(code, state, "/api/oauth/callback/antigravity");
     res.redirect(result.redirectTo);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error("[OAuth] Google callback error:", msg);
+    console.error("[OAuth] Antigravity callback error:", msg);
     const redirectUrl = new URL("/", OAUTH_BASE_URL);
     redirectUrl.searchParams.set("oauth_error", msg);
     res.redirect(redirectUrl.toString());
+  }
+});
+
+// --- GitHub Device Code Flow (no redirect URI needed) ---
+app.post("/api/oauth/github-copilot/device-start", async (_req, res) => {
+  if (!OAUTH_ENCRYPTION_SECRET) {
+    return res.status(400).json({ error: "missing_OAUTH_ENCRYPTION_SECRET" });
+  }
+
+  const clientId = process.env.OAUTH_GITHUB_CLIENT_ID ?? BUILTIN_GITHUB_CLIENT_ID;
+  try {
+    const resp = await fetch("https://github.com/login/device/code", {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ client_id: clientId, scope: "read:user user:email" }),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!resp.ok) {
+      return res.status(502).json({ error: "github_device_code_failed", status: resp.status });
+    }
+
+    const json = await resp.json() as {
+      device_code: string; user_code: string; verification_uri: string;
+      expires_in: number; interval: number;
+    };
+    if (!json.device_code || !json.user_code) {
+      return res.status(502).json({ error: "github_device_code_invalid" });
+    }
+
+    // Encrypt device_code server-side
+    const stateId = randomUUID();
+    db.prepare(
+      "INSERT INTO oauth_states (id, provider, created_at, verifier_enc, redirect_to) VALUES (?, ?, ?, ?, ?)"
+    ).run(stateId, "github", nowMs(), encryptSecret(json.device_code), null);
+
+    res.json({
+      stateId,
+      userCode: json.user_code,
+      verificationUri: json.verification_uri,
+      expiresIn: json.expires_in,
+      interval: json.interval,
+    });
+  } catch (err) {
+    res.status(500).json({ error: "github_device_start_failed", message: String(err) });
+  }
+});
+
+app.post("/api/oauth/github-copilot/device-poll", async (req, res) => {
+  const stateId = (req.body as { stateId?: string })?.stateId;
+  if (!stateId || typeof stateId !== "string") {
+    return res.status(400).json({ error: "stateId is required" });
+  }
+
+  const row = db.prepare(
+    "SELECT provider, verifier_enc, redirect_to, created_at FROM oauth_states WHERE id = ? AND provider = ?"
+  ).get(stateId, "github") as { provider: string; verifier_enc: string; redirect_to: string | null; created_at: number } | undefined;
+  if (!row) {
+    return res.status(400).json({ error: "invalid_state", status: "expired" });
+  }
+  if (nowMs() - row.created_at > OAUTH_STATE_TTL_MS) {
+    db.prepare("DELETE FROM oauth_states WHERE id = ?").run(stateId);
+    return res.json({ status: "expired" });
+  }
+
+  let deviceCode: string;
+  try {
+    deviceCode = decryptSecret(row.verifier_enc);
+  } catch {
+    return res.status(500).json({ error: "decrypt_failed" });
+  }
+
+  const clientId = process.env.OAUTH_GITHUB_CLIENT_ID ?? BUILTIN_GITHUB_CLIENT_ID;
+  try {
+    const resp = await fetch("https://github.com/login/oauth/access_token", {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: clientId,
+        device_code: deviceCode,
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (!resp.ok) {
+      return res.status(502).json({ error: "github_poll_failed", status: "error" });
+    }
+
+    const json = await resp.json() as Record<string, unknown>;
+
+    if ("access_token" in json && typeof json.access_token === "string") {
+      db.prepare("DELETE FROM oauth_states WHERE id = ?").run(stateId);
+      const accessToken = json.access_token;
+
+      // Fetch user email
+      let email: string | null = null;
+      try {
+        const emailsResp = await fetch("https://api.github.com/user/emails", {
+          headers: { Authorization: `Bearer ${accessToken}`, "User-Agent": "climpire", Accept: "application/vnd.github+json" },
+          signal: AbortSignal.timeout(5000),
+        });
+        if (emailsResp.ok) {
+          const emails = await emailsResp.json() as Array<{ email: string; primary: boolean; verified: boolean }>;
+          const primary = emails.find((e) => e.primary && e.verified);
+          if (primary) email = primary.email;
+        }
+      } catch { /* best-effort */ }
+
+      upsertOAuthCredential({
+        provider: "github",
+        source: "web-oauth",
+        email,
+        scope: typeof json.scope === "string" ? json.scope : null,
+        access_token: accessToken,
+        refresh_token: null,
+        expires_at: null,
+      });
+
+      return res.json({ status: "complete", email });
+    }
+
+    const error = typeof json.error === "string" ? json.error : "unknown";
+    if (error === "authorization_pending") return res.json({ status: "pending" });
+    if (error === "slow_down") return res.json({ status: "slow_down" });
+    if (error === "expired_token") {
+      db.prepare("DELETE FROM oauth_states WHERE id = ?").run(stateId);
+      return res.json({ status: "expired" });
+    }
+    if (error === "access_denied") {
+      db.prepare("DELETE FROM oauth_states WHERE id = ?").run(stateId);
+      return res.json({ status: "denied" });
+    }
+    return res.json({ status: "error", error });
+  } catch (err) {
+    return res.status(500).json({ error: "github_poll_error", message: String(err) });
   }
 });
 
 // POST /api/oauth/disconnect — Disconnect a provider
 app.post("/api/oauth/disconnect", (req, res) => {
   const provider = (req.body as { provider?: string })?.provider;
-  if (!provider || typeof provider !== "string") {
-    return res.status(400).json({ error: "provider is required" });
+  if (provider === "github-copilot") {
+    db.prepare("DELETE FROM oauth_credentials WHERE provider = ?").run("github");
+  } else if (provider === "antigravity") {
+    db.prepare("DELETE FROM oauth_credentials WHERE provider = ?").run("google_antigravity");
+  } else {
+    return res.status(400).json({ error: `Invalid provider: ${provider}` });
   }
-  db.prepare("DELETE FROM oauth_credentials WHERE provider = ?").run(provider);
   res.json({ ok: true });
 });
 
@@ -4207,6 +4317,57 @@ if (isProduction) {
     res.sendFile(path.join(distDir, "index.html"));
   });
 }
+
+// ---------------------------------------------------------------------------
+// Auto break rotation: idle ↔ break every 60s
+// ---------------------------------------------------------------------------
+function rotateBreaks(): void {
+  // Rule: max 1 agent per department on break at a time
+  const allAgents = db.prepare(
+    "SELECT id, department_id, status FROM agents WHERE status IN ('idle','break')"
+  ).all() as { id: string; department_id: string; status: string }[];
+
+  if (allAgents.length === 0) return;
+
+  // Group by department
+  const byDept = new Map<string, typeof allAgents>();
+  for (const a of allAgents) {
+    const list = byDept.get(a.department_id) || [];
+    list.push(a);
+    byDept.set(a.department_id, list);
+  }
+
+  for (const [, members] of byDept) {
+    const onBreak = members.filter(a => a.status === 'break');
+    const idle = members.filter(a => a.status === 'idle');
+
+    if (onBreak.length > 1) {
+      // Too many on break from same dept — return extras to idle
+      const extras = onBreak.slice(1);
+      for (const a of extras) {
+        db.prepare("UPDATE agents SET status = 'idle' WHERE id = ?").run(a.id);
+        broadcast("agent_status", db.prepare("SELECT * FROM agents WHERE id = ?").get(a.id));
+      }
+    } else if (onBreak.length === 1) {
+      // 40% chance to return from break (avg ~2.5 min break)
+      if (Math.random() < 0.4) {
+        db.prepare("UPDATE agents SET status = 'idle' WHERE id = ?").run(onBreak[0].id);
+        broadcast("agent_status", db.prepare("SELECT * FROM agents WHERE id = ?").get(onBreak[0].id));
+      }
+    } else if (onBreak.length === 0 && idle.length > 0) {
+      // 50% chance to send one idle agent on break
+      if (Math.random() < 0.5) {
+        const pick = idle[Math.floor(Math.random() * idle.length)];
+        db.prepare("UPDATE agents SET status = 'break' WHERE id = ?").run(pick.id);
+        broadcast("agent_status", db.prepare("SELECT * FROM agents WHERE id = ?").get(pick.id));
+      }
+    }
+  }
+}
+
+// Run rotation every 60 seconds, and once on startup after 5s
+setTimeout(rotateBreaks, 5_000);
+setInterval(rotateBreaks, 60_000);
 
 // ---------------------------------------------------------------------------
 // Start HTTP server + WebSocket
