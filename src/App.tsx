@@ -117,6 +117,7 @@ export default function App() {
   const [ceoOfficeCalls, setCeoOfficeCalls] = useState<CeoOfficeCall[]>([]);
   const [meetingPresence, setMeetingPresence] = useState<MeetingPresence[]>([]);
   const [oauthResult, setOauthResult] = useState<OAuthCallbackResult | null>(null);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const viewRef = useRef<View>("office");
   viewRef.current = view;
 
@@ -200,6 +201,18 @@ export default function App() {
       api.getCliStatus(true).then(setCliStatus).catch(console.error);
     }
   }, [view, cliStatus]);
+
+  useEffect(() => {
+    setMobileNavOpen(false);
+  }, [view]);
+
+  useEffect(() => {
+    const closeMobileNavOnDesktop = () => {
+      if (window.innerWidth >= 1024) setMobileNavOpen(false);
+    };
+    window.addEventListener("resize", closeMobileNavOnDesktop);
+    return () => window.removeEventListener("resize", closeMobileNavOnDesktop);
+  }, []);
 
   useEffect(() => {
     if (view !== "office") return;
@@ -654,25 +667,60 @@ export default function App() {
 
   return (
     <I18nProvider language={uiLanguage}>
-      <div className="h-screen flex overflow-hidden bg-slate-900">
-        {/* Sidebar */}
-        <Sidebar
-          currentView={view}
-          onChangeView={setView}
-          departments={departments}
-          agents={agents}
-          settings={settings}
-          connected={connected}
-        />
+      <div className="flex h-[100dvh] min-h-[100dvh] overflow-hidden bg-slate-900">
+        {/* Desktop Sidebar */}
+        <div className="hidden lg:flex lg:flex-shrink-0">
+          <Sidebar
+            currentView={view}
+            onChangeView={setView}
+            departments={departments}
+            agents={agents}
+            settings={settings}
+            connected={connected}
+          />
+        </div>
+
+        {/* Mobile Sidebar Overlay */}
+        {mobileNavOpen && (
+          <button
+            aria-label="Close navigation"
+            className="fixed inset-0 z-40 bg-black/50 lg:hidden"
+            onClick={() => setMobileNavOpen(false)}
+          />
+        )}
+        <div
+          className={`fixed inset-y-0 left-0 z-50 transition-transform duration-200 lg:hidden ${
+            mobileNavOpen ? "translate-x-0" : "-translate-x-full pointer-events-none"
+          }`}
+        >
+          <Sidebar
+            currentView={view}
+            onChangeView={(nextView) => {
+              setView(nextView);
+              setMobileNavOpen(false);
+            }}
+            departments={departments}
+            agents={agents}
+            settings={settings}
+            connected={connected}
+          />
+        </div>
 
         {/* Main Content */}
         <main className="flex-1 overflow-y-auto overflow-x-hidden min-w-0">
           {/* Top Bar */}
-          <header className="sticky top-0 z-30 bg-slate-900/80 backdrop-blur-sm border-b border-slate-700/50 px-6 py-3 flex items-center justify-between">
-            <div>
-              <h1 className="text-lg font-bold text-white">{viewTitle}</h1>
+          <header className="sticky top-0 z-30 flex items-center justify-between border-b border-slate-700/50 bg-slate-900/85 px-3 py-2 backdrop-blur-sm sm:px-4 sm:py-3 lg:px-6">
+            <div className="flex min-w-0 items-center gap-2">
+              <button
+                onClick={() => setMobileNavOpen(true)}
+                className="inline-flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-slate-700 bg-slate-800 text-slate-300 transition hover:bg-slate-700 hover:text-white lg:hidden"
+                aria-label="Open navigation"
+              >
+                ☰
+              </button>
+              <h1 className="truncate text-base font-bold text-white sm:text-lg">{viewTitle}</h1>
             </div>
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2 sm:gap-3">
               <button
                 onClick={() => {
                   setChatAgent(null);
@@ -682,9 +730,10 @@ export default function App() {
                     .then(setMessages)
                     .catch(console.error);
                 }}
-                className="px-3 py-1.5 text-sm bg-amber-600/20 text-amber-400 border border-amber-500/30 rounded-lg hover:bg-amber-600/30 transition-colors"
+                className="rounded-lg border border-amber-500/30 bg-amber-600/20 px-2.5 py-1.5 text-xs text-amber-400 transition-colors hover:bg-amber-600/30 sm:px-3 sm:text-sm"
               >
-                {announcementLabel}
+                <span className="sm:hidden">📢</span>
+                <span className="hidden sm:inline">{announcementLabel}</span>
               </button>
               <div className="flex items-center gap-2 text-xs text-slate-500">
                 <div
@@ -692,13 +741,13 @@ export default function App() {
                     connected ? "bg-green-500" : "bg-red-500"
                   }`}
                 />
-                {connected ? "Live" : "Offline"}
+                <span className="hidden sm:inline">{connected ? "Live" : "Offline"}</span>
               </div>
             </div>
           </header>
 
           {/* Views */}
-          <div className="p-6">
+          <div className="p-3 sm:p-4 lg:p-6">
             {view === "office" && (
               <OfficeView
                 departments={departments}

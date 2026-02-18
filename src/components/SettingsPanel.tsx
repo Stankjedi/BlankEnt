@@ -355,13 +355,13 @@ export default function SettingsPanel({
   }
 
   return (
-    <div className="max-w-2xl mx-auto space-y-6">
+    <div className="mx-auto max-w-2xl space-y-4 sm:space-y-6">
       <h2 className="text-xl font-bold text-white flex items-center gap-2">
         ⚙️ {t({ ko: "설정", en: "Settings", ja: "設定", zh: "设置" })}
       </h2>
 
       {/* Tab navigation */}
-      <div className="flex border-b border-slate-700/50">
+      <div className="flex flex-wrap gap-1 border-b border-slate-700/50 pb-1">
         {[
           {
             key: "general",
@@ -382,7 +382,7 @@ export default function SettingsPanel({
           <button
             key={t.key}
             onClick={() => setTab(t.key as typeof tab)}
-            className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium transition-colors ${
+            className={`flex items-center gap-1.5 rounded-t-lg px-3 py-2 text-xs font-medium transition-colors sm:px-4 sm:py-2.5 sm:text-sm ${
               tab === t.key
                 ? "text-blue-400 border-b-2 border-blue-400"
                 : "text-slate-400 hover:text-slate-200"
@@ -397,7 +397,7 @@ export default function SettingsPanel({
       {/* General Settings Tab */}
       {tab === "general" && (
       <>
-      <section className="bg-slate-800/60 border border-slate-700/50 rounded-xl p-5 space-y-4">
+      <section className="space-y-4 rounded-xl border border-slate-700/50 bg-slate-800/60 p-4 sm:p-5">
         <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">
           {t({ ko: "회사 정보", en: "Company", ja: "会社情報", zh: "公司信息" })}
         </h3>
@@ -512,7 +512,7 @@ export default function SettingsPanel({
 
       {/* CLI Status Tab */}
       {tab === "cli" && (
-      <section className="bg-slate-800/60 border border-slate-700/50 rounded-xl p-5 space-y-4">
+      <section className="space-y-4 rounded-xl border border-slate-700/50 bg-slate-800/60 p-4 sm:p-5">
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">
             {t({ ko: "CLI 도구 상태", en: "CLI Tool Status", ja: "CLI ツール状態", zh: "CLI 工具状态" })}
@@ -772,7 +772,7 @@ export default function SettingsPanel({
 
       {/* OAuth Tab */}
       {tab === "oauth" && (
-      <section className="bg-slate-800/60 border border-slate-700/50 rounded-xl p-5 space-y-4">
+      <section className="space-y-4 rounded-xl border border-slate-700/50 bg-slate-800/60 p-4 sm:p-5">
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider">
             {t({ ko: "OAuth 인증 현황", en: "OAuth Status", ja: "OAuth 認証状態", zh: "OAuth 认证状态" })}
@@ -953,7 +953,7 @@ export default function SettingsPanel({
                           </div>
                         </div>
                         {(info.scope || expiresAt || (info.created_at > 0)) && (
-                          <div className="grid grid-cols-2 gap-2 text-xs">
+                          <div className="grid grid-cols-1 gap-2 text-xs sm:grid-cols-2">
                             {info.scope && (
                               <div className="col-span-2">
                                 <span className="text-slate-500">
@@ -1039,7 +1039,7 @@ export default function SettingsPanel({
               <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
                 {t({ ko: "새 OAuth 연결", en: "New OAuth Connection", ja: "新しい OAuth 接続", zh: "新 OAuth 连接" })}
               </div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 {CONNECTABLE_PROVIDERS.map(({ id, label, Logo, description }) => {
                   const providerInfo = oauthStatus.providers[id];
                   const isConnected = providerInfo?.connected;

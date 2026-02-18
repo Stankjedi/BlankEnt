@@ -166,7 +166,7 @@ export default function TerminalPanel({ taskId, task, agent, agents, initialTab 
   };
 
   return (
-    <div className="fixed inset-y-0 right-0 z-40 w-[560px] max-w-full flex flex-col bg-[#0d1117] border-l border-slate-700/50 shadow-2xl">
+    <div className="fixed inset-0 z-50 flex w-full max-w-full flex-col bg-[#0d1117] shadow-2xl lg:inset-y-0 lg:right-0 lg:left-auto lg:w-[560px] lg:border-l lg:border-slate-700/50">
       {/* Header */}
       <div className="flex items-center gap-3 px-4 py-3 border-b border-slate-700/50 bg-[#161b22]">
         <div className="flex items-center gap-2 flex-1 min-w-0">

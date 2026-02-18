@@ -99,7 +99,7 @@ function detachNode(node: Container): void {
 /*  Constants                                                          */
 /* ================================================================== */
 
-const MIN_OFFICE_W = 820;
+const MIN_OFFICE_W = 360;
 const CEO_ZONE_H = 110;
 const HALLWAY_H = 32;
 const TARGET_CHAR_H = 52;

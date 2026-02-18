@@ -48,7 +48,7 @@ export default function Sidebar({
 
   return (
     <aside
-      className={`flex flex-col bg-slate-800/80 backdrop-blur-sm border-r border-slate-700/50 transition-all duration-300 ${
+      className={`flex h-full flex-col bg-slate-800/80 backdrop-blur-sm border-r border-slate-700/50 transition-all duration-300 ${
         collapsed ? "w-16" : "w-48"
       }`}
     >
