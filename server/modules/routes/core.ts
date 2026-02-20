@@ -228,6 +228,12 @@ function reconcileTaskListIfDue(): void {
   reconcileCrossDeptSubtasks();
 }
 
+function readBoundedInt(value: unknown, fallback: number, min: number, max: number): number {
+  const raw = Number(value);
+  if (!Number.isFinite(raw)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(raw)));
+}
+
 // ---------------------------------------------------------------------------
 // Gateway Channel Messaging
 // ---------------------------------------------------------------------------
@@ -556,6 +562,8 @@ app.get("/api/tasks", (req, res) => {
   const statusFilter = firstQueryValue(req.query.status);
   const deptFilter = firstQueryValue(req.query.department_id);
   const agentFilter = firstQueryValue(req.query.agent_id);
+  const limit = readBoundedInt(firstQueryValue(req.query.limit), 100, 1, 500);
+  const offset = readBoundedInt(firstQueryValue(req.query.offset), 0, 0, 100000);
 
   const conditions: string[] = [];
   const params: unknown[] = [];
@@ -611,9 +619,13 @@ app.get("/api/tasks", (req, res) => {
     LEFT JOIN delegated_counts dc ON dc.task_id = t.id
     ${where}
     ORDER BY t.priority DESC, t.updated_at DESC
-  `).all(...(params as SQLInputValue[]));
+    LIMIT ? OFFSET ?
+  `).all(...([...(params as SQLInputValue[]), limit, offset] as SQLInputValue[]));
 
-  res.json({ tasks });
+  const total = Number(
+    (db.prepare(`SELECT COUNT(*) AS cnt FROM tasks t ${where}`).get(...(params as SQLInputValue[])) as { cnt?: number } | undefined)?.cnt ?? 0,
+  );
+  res.json({ tasks, limit, offset, total });
 });
 
 app.post("/api/tasks", (req, res) => {
@@ -1001,7 +1013,7 @@ app.post("/api/tasks/:id/assign", (req, res) => {
   res.json({ ok: true, task: updatedTask, agent: updatedAgent });
 });
 
-app.post("/api/tasks/:id/run", (req, res) => {
+app.post("/api/tasks/:id/run", async (req, res) => {
   const id = String(req.params.id);
   const task = db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as {
     id: string;
@@ -1068,7 +1080,7 @@ app.post("/api/tasks/:id/run", (req, res) => {
   const logPath = path.join(logsDir, `${id}.log`);
 
   // Try to create a Git worktree for agent isolation
-  const worktreePath = createWorktree(projectPath, id, agent.name);
+  const worktreePath = await createWorktree(projectPath, id, agent.name);
   const agentCwd = worktreePath || projectPath;
 
   if (worktreePath) {

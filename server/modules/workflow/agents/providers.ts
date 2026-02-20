@@ -1725,12 +1725,20 @@ const CLI_TOOLS: CliToolDef[] = [
   },
 ];
 
-function execWithTimeout(cmd: string, args: string[], timeoutMs: number): Promise<string> {
+function execWithTimeout(
+  cmd: string,
+  args: string[],
+  timeoutMs: number,
+  opts: { maxBuffer?: number } = {},
+): Promise<string> {
   return new Promise((resolve, reject) => {
     // Windows에서 npm .cmd wrapper 실행을 위해 shell: true 필요
-    const opts: any = { timeout: timeoutMs };
-    if (process.platform === "win32") opts.shell = true;
-    const child = execFile(cmd, args, opts, (err, stdout) => {
+    const execOpts: any = {
+      timeout: timeoutMs,
+      maxBuffer: Math.max(64 * 1024, opts.maxBuffer ?? 8 * 1024 * 1024),
+    };
+    if (process.platform === "win32") execOpts.shell = true;
+    const child = execFile(cmd, args, execOpts, (err, stdout) => {
       if (err) return reject(err);
       resolve(stdout.trim());
     });

@@ -131,6 +131,7 @@ export function initializeWorkflowPartC(ctx: any): any {
   const completeSubtaskFromCli = __ctx.completeSubtaskFromCli;
   const seedReviewRevisionSubtasks = __ctx.seedReviewRevisionSubtasks;
   const codexThreadToSubtask = __ctx.codexThreadToSubtask;
+  const cleanupCodexThreadMappingsForTask = __ctx.cleanupCodexThreadMappingsForTask;
   const parseAndCreateSubtasks = __ctx.parseAndCreateSubtasks;
   const ANTIGRAVITY_ENDPOINTS = __ctx.ANTIGRAVITY_ENDPOINTS;
   const ANTIGRAVITY_DEFAULT_PROJECT = __ctx.ANTIGRAVITY_DEFAULT_PROJECT;
@@ -793,6 +794,16 @@ function handleTaskRunComplete(taskId: string, exitCode: number): void {
   stopRequestedTasks.delete(taskId);
   stopRequestModeByTask.delete(taskId);
 
+  if (typeof cleanupCodexThreadMappingsForTask === "function") {
+    cleanupCodexThreadMappingsForTask(taskId);
+  } else {
+    // Backward-compatible fallback for runtimes where cleanup helper is unavailable.
+    for (const [tid, itemId] of codexThreadToSubtask) {
+      const row = db.prepare("SELECT id FROM subtasks WHERE cli_tool_use_id = ? AND task_id = ?").get(itemId, taskId);
+      if (row) codexThreadToSubtask.delete(tid);
+    }
+  }
+
   // If task was stopped/deleted or no longer in-progress, ignore late close events.
   if (!task || stopRequested || task.status !== "in_progress") {
     if (task) {
@@ -807,12 +818,6 @@ function handleTaskRunComplete(taskId: string, exitCode: number): void {
       clearTaskWorkflowState(taskId);
     }
     return;
-  }
-
-  // Clean up Codex thread→subtask mappings for this task's subtasks
-  for (const [tid, itemId] of codexThreadToSubtask) {
-    const row = db.prepare("SELECT id FROM subtasks WHERE cli_tool_use_id = ? AND task_id = ?").get(itemId, taskId);
-    if (row) codexThreadToSubtask.delete(tid);
   }
 
   const t = nowMs();
@@ -1134,7 +1139,7 @@ function finishReview(taskId: string, taskTitle: string): void {
     }
   }
 
-  const finalizeApprovedReview = () => {
+  const finalizeApprovedReview = async () => {
     const t = nowMs();
     const latestTask = db.prepare("SELECT status, department_id FROM tasks WHERE id = ?").get(taskId) as { status: string; department_id: string | null } | undefined;
     if (!latestTask || latestTask.status !== "review") return;
@@ -1143,7 +1148,7 @@ function finishReview(taskId: string, taskTitle: string): void {
     const wtInfo = taskWorktrees.get(taskId);
     let mergeNote = "";
     if (wtInfo) {
-      const mergeResult = mergeWorktree(wtInfo.projectPath, taskId);
+      const mergeResult = await mergeWorktree(wtInfo.projectPath, taskId);
 
       if (mergeResult.success) {
         appendTaskLog(taskId, "system", `Git merge completed: ${mergeResult.message}`);
@@ -1251,11 +1256,13 @@ function finishReview(taskId: string, taskTitle: string): void {
 
   if (currentTask.source_task_id) {
     appendTaskLog(taskId, "system", "Review consensus skipped for delegated collaboration task");
-    finalizeApprovedReview();
+    void finalizeApprovedReview();
     return;
   }
 
-  startReviewConsensusMeeting(taskId, taskTitle, currentTask.department_id, finalizeApprovedReview);
+  startReviewConsensusMeeting(taskId, taskTitle, currentTask.department_id, () => {
+    void finalizeApprovedReview();
+  });
 }
 
   return {

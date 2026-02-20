@@ -859,10 +859,40 @@ function seedReviewRevisionSubtasks(taskId: string, ownerDeptId: string | null, 
 
 // Codex multi-agent: map thread_id → cli_tool_use_id (item.id from spawn_agent)
 const codexThreadToSubtask = new Map<string, string>();
+const codexThreadsByTask = new Map<string, Set<string>>();
 const SUBTASK_PARSE_BATCH_MS = 120;
 const SUBTASK_PARSE_MAX_BUFFER_CHARS = 256 * 1024;
 const pendingSubtaskParseByTask = new Map<string, string>();
 const pendingSubtaskParseTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function rememberCodexThreadMapping(taskId: string, threadId: string, itemId: string): void {
+  if (!taskId || !threadId || !itemId) return;
+  codexThreadToSubtask.set(threadId, itemId);
+  let set = codexThreadsByTask.get(taskId);
+  if (!set) {
+    set = new Set<string>();
+    codexThreadsByTask.set(taskId, set);
+  }
+  set.add(threadId);
+}
+
+function forgetCodexThreadMapping(taskId: string, threadId: string): void {
+  if (!threadId) return;
+  codexThreadToSubtask.delete(threadId);
+  const set = codexThreadsByTask.get(taskId);
+  if (!set) return;
+  set.delete(threadId);
+  if (set.size === 0) codexThreadsByTask.delete(taskId);
+}
+
+function cleanupCodexThreadMappingsForTask(taskId: string): void {
+  const set = codexThreadsByTask.get(taskId);
+  if (!set || set.size === 0) return;
+  for (const threadId of set) {
+    codexThreadToSubtask.delete(threadId);
+  }
+  codexThreadsByTask.delete(taskId);
+}
 
 function flushPendingSubtaskParse(taskId: string): void {
   const buffered = pendingSubtaskParseByTask.get(taskId);
@@ -953,8 +983,10 @@ function parseAndCreateSubtasks(taskId: string, data: string): void {
           if (item.tool === "spawn_agent") {
             const itemId = item.id as string;
             const threadIds = (item.receiver_thread_ids as string[]) || [];
-            if (itemId && threadIds[0]) {
-              codexThreadToSubtask.set(threadIds[0], itemId);
+            if (itemId && threadIds.length > 0) {
+              for (const threadId of threadIds) {
+                rememberCodexThreadMapping(taskId, String(threadId), itemId);
+              }
             }
           } else if (item.tool === "close_agent") {
             const threadIds = (item.receiver_thread_ids as string[]) || [];
@@ -962,8 +994,8 @@ function parseAndCreateSubtasks(taskId: string, data: string): void {
               const origItemId = codexThreadToSubtask.get(tid);
               if (origItemId) {
                 completeSubtaskFromCli(origItemId);
-                codexThreadToSubtask.delete(tid);
               }
+              forgetCodexThreadMapping(taskId, tid);
             }
           }
         }
@@ -1230,6 +1262,7 @@ const {
     seedApprovedPlanSubtasks,
     seedReviewRevisionSubtasks,
     codexThreadToSubtask,
+    cleanupCodexThreadMappingsForTask,
     spawnCliAgent,
     httpAgentCounter,
     cachedModels,

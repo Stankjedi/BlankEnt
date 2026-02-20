@@ -448,6 +448,7 @@ async function readUtf8Tail(filePath: string, maxBytes: number): Promise<string>
 app.get("/api/tasks/:id/terminal", async (req, res) => {
   const id = String(req.params.id);
   const lines = Math.min(Math.max(Number(req.query.lines ?? 200), 20), 4000);
+  const taskLogLimit = Math.min(Math.max(Number(req.query.task_log_limit ?? 500), 0), 2000);
   const pretty = String(req.query.pretty ?? "0") === "1";
   const filePath = path.join(logsDir, `${id}.log`);
 
@@ -468,9 +469,19 @@ app.get("/api/tasks/:id/terminal", async (req, res) => {
   }
 
   // Also return task_logs (system events) for interleaved display
-  const taskLogs = db.prepare(
-    "SELECT id, kind, message, created_at FROM task_logs WHERE task_id = ? ORDER BY created_at ASC"
-  ).all(id) as Array<{ id: number; kind: string; message: string; created_at: number }>;
+  const taskLogs = taskLogLimit > 0
+    ? db.prepare(`
+      SELECT id, kind, message, created_at
+      FROM (
+        SELECT id, kind, message, created_at
+        FROM task_logs
+        WHERE task_id = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+      )
+      ORDER BY created_at ASC
+    `).all(id, taskLogLimit) as Array<{ id: number; kind: string; message: string; created_at: number }>
+    : [];
 
   res.json({ ok: true, exists: true, path: filePath, text, task_logs: taskLogs });
 });
@@ -2139,12 +2150,14 @@ app.get("/api/tasks/:id/diff", async (req, res) => {
       "git",
       ["-C", wtInfo.projectPath, "diff", `${currentBranch}...${wtInfo.branchName}`, "--stat"],
       10000,
+      { maxBuffer: 2 * 1024 * 1024 },
     );
 
     const diff = await execWithTimeout(
       "git",
       ["-C", wtInfo.projectPath, "diff", "--no-color", `${currentBranch}...${wtInfo.branchName}`],
       15000,
+      { maxBuffer: 16 * 1024 * 1024 },
     );
 
     res.json({
@@ -2156,23 +2169,24 @@ app.get("/api/tasks/:id/diff", async (req, res) => {
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    res.json({ ok: false, error: msg });
+    const status = /\b(timeout|timed out|ETIMEDOUT)\b/i.test(msg) ? 504 : 500;
+    res.status(status).json({ ok: false, error: msg });
   }
 });
 
 // POST /api/tasks/:id/merge — Manually trigger merge
-app.post("/api/tasks/:id/merge", (req, res) => {
+app.post("/api/tasks/:id/merge", async (req, res) => {
   const id = String(req.params.id);
   const wtInfo = taskWorktrees.get(id);
   if (!wtInfo) {
     return res.status(404).json({ error: "no_worktree", message: "No worktree found for this task" });
   }
 
-  const result = mergeWorktree(wtInfo.projectPath, id);
+  const result = await mergeWorktree(wtInfo.projectPath, id);
   const lang = resolveLang();
 
   if (result.success) {
-    cleanupWorktree(wtInfo.projectPath, id);
+    await cleanupWorktree(wtInfo.projectPath, id);
     appendTaskLog(id, "system", `Manual merge completed: ${result.message}`);
     notifyCeo(pickL(l(
       [`수동 병합 완료: ${result.message}`],
@@ -2188,14 +2202,14 @@ app.post("/api/tasks/:id/merge", (req, res) => {
 });
 
 // POST /api/tasks/:id/discard — Discard worktree changes (abandon branch)
-app.post("/api/tasks/:id/discard", (req, res) => {
+app.post("/api/tasks/:id/discard", async (req, res) => {
   const id = String(req.params.id);
   const wtInfo = taskWorktrees.get(id);
   if (!wtInfo) {
     return res.status(404).json({ error: "no_worktree", message: "No worktree found for this task" });
   }
 
-  cleanupWorktree(wtInfo.projectPath, id);
+  await cleanupWorktree(wtInfo.projectPath, id);
   appendTaskLog(id, "system", "Worktree discarded (changes abandoned)");
   const lang = resolveLang();
   notifyCeo(pickL(l(

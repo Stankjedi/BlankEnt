@@ -201,8 +201,22 @@ function isGitRepo(dir: string): boolean {
   }
 }
 
-function createWorktree(projectPath: string, taskId: string, agentName: string): string | null {
-  if (!isGitRepo(projectPath)) return null;
+async function isGitRepoAsync(dir: string): Promise<boolean> {
+  try {
+    await execWithTimeout("git", ["-C", dir, "rev-parse", "--is-inside-work-tree"], 5000);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function parseExecErrorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
+
+async function createWorktree(projectPath: string, taskId: string, agentName: string): Promise<string | null> {
+  if (!(await isGitRepoAsync(projectPath))) return null;
 
   const shortId = taskId.slice(0, 8);
   const branchName = `climpire/${shortId}`;
@@ -213,20 +227,21 @@ function createWorktree(projectPath: string, taskId: string, agentName: string):
     fs.mkdirSync(worktreeBase, { recursive: true });
 
     // Get current branch/HEAD as base
-    const base = execFileSync("git", ["rev-parse", "HEAD"], { cwd: projectPath, stdio: "pipe", timeout: 5000 }).toString().trim();
+    const base = await execWithTimeout("git", ["-C", projectPath, "rev-parse", "HEAD"], 5000);
 
     // Create worktree with new branch
-    execFileSync("git", ["worktree", "add", worktreePath, "-b", branchName, base], {
-      cwd: projectPath,
-      stdio: "pipe",
-      timeout: 15000,
-    });
+    await execWithTimeout(
+      "git",
+      ["-C", projectPath, "worktree", "add", worktreePath, "-b", branchName, base],
+      15000,
+      { maxBuffer: 2 * 1024 * 1024 },
+    );
 
     taskWorktrees.set(taskId, { worktreePath, branchName, projectPath });
     console.log(`[Claw-Empire] Created worktree for task ${shortId}: ${worktreePath} (branch: ${branchName}, agent: ${agentName})`);
     return worktreePath;
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = parseExecErrorMessage(err);
     console.error(`[Claw-Empire] Failed to create worktree for task ${shortId}: ${msg}`);
     return null;
   }
@@ -239,7 +254,7 @@ function hasVisibleDiffSummary(summary: string): boolean {
   return Boolean(summary && summary !== DIFF_SUMMARY_NONE && summary !== DIFF_SUMMARY_ERROR);
 }
 
-function mergeWorktree(projectPath: string, taskId: string): { success: boolean; message: string; conflicts?: string[] } {
+async function mergeWorktree(projectPath: string, taskId: string): Promise<{ success: boolean; message: string; conflicts?: string[] }> {
   const info = taskWorktrees.get(taskId);
   if (!info) return { success: false, message: "No worktree found for this task" };
   const taskRow = db.prepare("SELECT title, description FROM tasks WHERE id = ?").get(taskId) as {
@@ -250,15 +265,16 @@ function mergeWorktree(projectPath: string, taskId: string): { success: boolean;
 
   try {
     // Get current branch name in the original repo
-    const currentBranch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
-      cwd: projectPath, stdio: "pipe", timeout: 5000,
-    }).toString().trim();
+    const currentBranch = await execWithTimeout("git", ["-C", projectPath, "rev-parse", "--abbrev-ref", "HEAD"], 5000);
 
     // Check if there are actual changes to merge
     try {
-      const diffCheck = execFileSync("git", ["diff", `${currentBranch}...${info.branchName}`, "--stat"], {
-        cwd: projectPath, stdio: "pipe", timeout: 10000,
-      }).toString().trim();
+      const diffCheck = await execWithTimeout(
+        "git",
+        ["-C", projectPath, "diff", `${currentBranch}...${info.branchName}`, "--stat"],
+        10000,
+        { maxBuffer: 2 * 1024 * 1024 },
+      );
       if (!diffCheck) {
         return {
           success: true,
@@ -274,9 +290,12 @@ function mergeWorktree(projectPath: string, taskId: string): { success: boolean;
 
     // Attempt merge with no-ff
     const mergeMsg = `Merge climpire task ${taskId.slice(0, 8)} (branch ${info.branchName})`;
-    execFileSync("git", ["merge", info.branchName, "--no-ff", "-m", mergeMsg], {
-      cwd: projectPath, stdio: "pipe", timeout: 30000,
-    });
+    await execWithTimeout(
+      "git",
+      ["-C", projectPath, "merge", info.branchName, "--no-ff", "-m", mergeMsg],
+      30000,
+      { maxBuffer: 4 * 1024 * 1024 },
+    );
 
     return {
       success: true,
@@ -290,14 +309,18 @@ function mergeWorktree(projectPath: string, taskId: string): { success: boolean;
   } catch (err: unknown) {
     // Detect conflicts by checking git status instead of parsing error messages
     try {
-      const unmerged = execFileSync("git", ["diff", "--name-only", "--diff-filter=U"], {
-        cwd: projectPath, stdio: "pipe", timeout: 5000,
-      }).toString().trim();
+      const unmerged = await execWithTimeout(
+        "git",
+        ["-C", projectPath, "diff", "--name-only", "--diff-filter=U"],
+        5000,
+      );
       const conflicts = unmerged ? unmerged.split("\n").filter(Boolean) : [];
 
       if (conflicts.length > 0) {
         // Abort the failed merge
-        try { execFileSync("git", ["merge", "--abort"], { cwd: projectPath, stdio: "pipe", timeout: 5000 }); } catch { /* ignore */ }
+        try {
+          await execWithTimeout("git", ["-C", projectPath, "merge", "--abort"], 5000);
+        } catch { /* ignore */ }
 
         return {
           success: false,
@@ -313,9 +336,11 @@ function mergeWorktree(projectPath: string, taskId: string): { success: boolean;
     } catch { /* ignore conflict detection failure */ }
 
     // Abort any partial merge
-    try { execFileSync("git", ["merge", "--abort"], { cwd: projectPath, stdio: "pipe", timeout: 5000 }); } catch { /* ignore */ }
+    try {
+      await execWithTimeout("git", ["-C", projectPath, "merge", "--abort"], 5000);
+    } catch { /* ignore */ }
 
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = parseExecErrorMessage(err);
     return {
       success: false,
       message: pickL(l(
