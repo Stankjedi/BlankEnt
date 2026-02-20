@@ -455,7 +455,52 @@ const CONTEXT_IGNORE_FILES = new Set([
   ".DS_Store", "Thumbs.db",
 ]);
 
-function buildFileTree(dir: string, prefix = "", depth = 0, maxDepth = 4): string[] {
+type TimedCacheEntry<T> = {
+  value: T;
+  expiresAt: number;
+};
+
+const PROJECT_ANALYSIS_CACHE_TTL_MS = 30_000;
+const RECENT_CHANGES_CACHE_TTL_MS = 7_500;
+const techStackCache = new Map<string, TimedCacheEntry<string[]>>();
+const keyFilesCache = new Map<string, TimedCacheEntry<string[]>>();
+const fileTreeCache = new Map<string, TimedCacheEntry<string[]>>();
+const recentChangesCache = new Map<string, TimedCacheEntry<string>>();
+
+function readTimedCache<T>(cache: Map<string, TimedCacheEntry<T>>, key: string): T | null {
+  const entry = cache.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    cache.delete(key);
+    return null;
+  }
+  return entry.value;
+}
+
+function writeTimedCache<T>(cache: Map<string, TimedCacheEntry<T>>, key: string, value: T, ttlMs: number): void {
+  cache.set(key, { value, expiresAt: Date.now() + ttlMs });
+}
+
+function readUtf8TailSync(filePath: string, maxBytes = 256 * 1024): string {
+  try {
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile() || stat.size <= 0) return "";
+    const readSize = Math.min(stat.size, Math.max(1, maxBytes));
+    const start = stat.size - readSize;
+    const buffer = Buffer.alloc(readSize);
+    const fd = fs.openSync(filePath, "r");
+    try {
+      fs.readSync(fd, buffer, 0, readSize, start);
+    } finally {
+      fs.closeSync(fd);
+    }
+    return buffer.toString("utf8");
+  } catch {
+    return "";
+  }
+}
+
+function buildFileTreeInternal(dir: string, prefix = "", depth = 0, maxDepth = 4): string[] {
   if (depth >= maxDepth) return [`${prefix}...`];
   let entries: fs.Dirent[];
   try {
@@ -481,7 +526,7 @@ function buildFileTree(dir: string, prefix = "", depth = 0, maxDepth = 4): strin
     const childPrefix = isLast ? "    " : "│   ";
     if (e.isDirectory()) {
       lines.push(`${prefix}${connector}${e.name}/`);
-      lines.push(...buildFileTree(path.join(dir, e.name), prefix + childPrefix, depth + 1, maxDepth));
+      lines.push(...buildFileTreeInternal(path.join(dir, e.name), prefix + childPrefix, depth + 1, maxDepth));
     } else {
       lines.push(`${prefix}${connector}${e.name}`);
     }
@@ -489,7 +534,22 @@ function buildFileTree(dir: string, prefix = "", depth = 0, maxDepth = 4): strin
   return lines;
 }
 
+function buildFileTree(dir: string, prefix = "", depth = 0, maxDepth = 4): string[] {
+  if (depth !== 0 || prefix) {
+    return buildFileTreeInternal(dir, prefix, depth, maxDepth);
+  }
+  const cacheKey = `${dir}::${maxDepth}`;
+  const cached = readTimedCache(fileTreeCache, cacheKey);
+  if (cached) return [...cached];
+  const fresh = buildFileTreeInternal(dir, prefix, depth, maxDepth);
+  writeTimedCache(fileTreeCache, cacheKey, [...fresh], PROJECT_ANALYSIS_CACHE_TTL_MS);
+  return fresh;
+}
+
 function detectTechStack(projectPath: string): string[] {
+  const cached = readTimedCache(techStackCache, projectPath);
+  if (cached) return [...cached];
+
   const stack: string[] = [];
   try {
     const pkgPath = path.join(projectPath, "package.json");
@@ -518,10 +578,14 @@ function detectTechStack(projectPath: string): string[] {
   try { if (fs.existsSync(path.join(projectPath, "Cargo.toml"))) stack.push("Rust"); } catch {}
   try { if (fs.existsSync(path.join(projectPath, "pom.xml"))) stack.push("Java (Maven)"); } catch {}
   try { if (fs.existsSync(path.join(projectPath, "build.gradle")) || fs.existsSync(path.join(projectPath, "build.gradle.kts"))) stack.push("Java (Gradle)"); } catch {}
+  writeTimedCache(techStackCache, projectPath, [...stack], PROJECT_ANALYSIS_CACHE_TTL_MS);
   return stack;
 }
 
 function getKeyFiles(projectPath: string): string[] {
+  const cached = readTimedCache(keyFilesCache, projectPath);
+  if (cached) return [...cached];
+
   const keyPatterns = [
     "package.json", "tsconfig.json", "vite.config.ts", "vite.config.js",
     "next.config.js", "next.config.ts", "webpack.config.js",
@@ -563,6 +627,7 @@ function getKeyFiles(projectPath: string): string[] {
     } catch {}
   }
 
+  writeTimedCache(keyFilesCache, projectPath, [...result], PROJECT_ANALYSIS_CACHE_TTL_MS);
   return result;
 }
 
@@ -656,6 +721,10 @@ function buildProjectContextContent(projectPath: string): string {
 }
 
 function getRecentChanges(projectPath: string, taskId: string): string {
+  const cacheKey = `${projectPath}::${taskId}`;
+  const cached = readTimedCache(recentChangesCache, cacheKey);
+  if (cached !== null) return cached;
+
   const parts: string[] = [];
 
   // 1. Recent commits (git log --oneline -10)
@@ -714,8 +783,13 @@ function getRecentChanges(projectPath: string, taskId: string): string {
     }
   } catch {}
 
-  if (!parts.length) return "";
-  return parts.join("\n\n");
+  if (!parts.length) {
+    writeTimedCache(recentChangesCache, cacheKey, "", RECENT_CHANGES_CACHE_TTL_MS);
+    return "";
+  }
+  const joined = parts.join("\n\n");
+  writeTimedCache(recentChangesCache, cacheKey, joined, RECENT_CHANGES_CACHE_TTL_MS);
+  return joined;
 }
 
 function ensureClaudeMd(projectPath: string, worktreePath: string): void {
@@ -749,6 +823,13 @@ function ensureClaudeMd(projectPath: string, worktreePath: string): void {
 
   // Copy to worktree root
   try {
+    const srcStat = fs.statSync(claudeMdSrc);
+    try {
+      const dstStat = fs.statSync(claudeMdDst);
+      if (dstStat.size === srcStat.size && dstStat.mtimeMs >= srcStat.mtimeMs) return;
+    } catch {
+      // Destination missing: copy below.
+    }
     fs.copyFileSync(claudeMdSrc, claudeMdDst);
   } catch (err) {
     console.warn(`[Claw-Empire] Failed to copy CLAUDE.md to worktree: ${err}`);
@@ -1446,7 +1527,7 @@ async function runAgentOneShot(
       }
       // logStream fallback
       if (!rawOutput.trim() && fs.existsSync(logPath)) {
-        rawOutput = fs.readFileSync(logPath, "utf8");
+        rawOutput = readUtf8TailSync(logPath, 256 * 1024);
       }
     } else if (provider === "copilot" || provider === "antigravity") {
       const controller = new AbortController();
@@ -1480,7 +1561,7 @@ async function runAgentOneShot(
         clearTimeout(timeout);
       }
       if (!rawOutput.trim() && fs.existsSync(logPath)) {
-        rawOutput = fs.readFileSync(logPath, "utf8");
+        rawOutput = readUtf8TailSync(logPath, 256 * 1024);
       }
     } else {
       const modelConfig = getProviderModelConfig();

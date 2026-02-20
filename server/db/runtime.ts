@@ -64,13 +64,24 @@ export function initializeDatabaseRuntime(): {
   db: DatabaseSync;
   logsDir: string;
 } {
-  if (!process.env.DB_PATH && !fs.existsSync(DEFAULT_DB_PATH) && fs.existsSync(LEGACY_DB_PATH)) {
-    fs.renameSync(LEGACY_DB_PATH, DEFAULT_DB_PATH);
-    for (const suffix of ["-wal", "-shm"]) {
-      const src = LEGACY_DB_PATH + suffix;
-      if (fs.existsSync(src)) fs.renameSync(src, DEFAULT_DB_PATH + suffix);
+  const renameIfExists = (src: string, dst: string): boolean => {
+    try {
+      fs.renameSync(src, dst);
+      return true;
+    } catch (err) {
+      if ((err as { code?: string })?.code === "ENOENT") return false;
+      throw err;
     }
-    console.log("[Claw-Empire] Migrated database: climpire.sqlite -> claw-empire.sqlite");
+  };
+
+  if (!process.env.DB_PATH && !fs.existsSync(DEFAULT_DB_PATH)) {
+    const migratedMainDb = renameIfExists(LEGACY_DB_PATH, DEFAULT_DB_PATH);
+    if (migratedMainDb) {
+      for (const suffix of ["-wal", "-shm"]) {
+        renameIfExists(LEGACY_DB_PATH + suffix, DEFAULT_DB_PATH + suffix);
+      }
+      console.log("[Claw-Empire] Migrated database: climpire.sqlite -> claw-empire.sqlite");
+    }
   }
 
   const dbPath = process.env.DB_PATH ?? DEFAULT_DB_PATH;

@@ -361,6 +361,25 @@ function stopProgressTimer(taskId: string): void {
   }
 }
 
+async function readUtf8Tail(filePath: string, maxBytes = 256 * 1024): Promise<string> {
+  try {
+    const stat = await fs.promises.stat(filePath);
+    if (!stat.isFile() || stat.size <= 0) return "";
+    const readSize = Math.min(stat.size, Math.max(1, maxBytes));
+    const start = stat.size - readSize;
+    const handle = await fs.promises.open(filePath, "r");
+    try {
+      const buffer = Buffer.alloc(readSize);
+      await handle.read(buffer, 0, readSize, start);
+      return buffer.toString("utf8");
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return "";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Send CEO notification for all significant workflow events (B4)
 // ---------------------------------------------------------------------------
@@ -803,17 +822,13 @@ function handleTaskRunComplete(taskId: string, exitCode: number): void {
 
   // Read log file for result
   const logPath = path.join(logsDir, `${taskId}.log`);
-  let result: string | null = null;
-  try {
-    if (fs.existsSync(logPath)) {
-      const raw = fs.readFileSync(logPath, "utf8");
-      result = raw.slice(-2000);
+  void (async () => {
+    const raw = await readUtf8Tail(logPath, 256 * 1024);
+    const result = raw ? raw.slice(-2000) : "";
+    if (result) {
+      db.prepare("UPDATE tasks SET result = ? WHERE id = ?").run(result, taskId);
     }
-  } catch { /* ignore */ }
-
-  if (result) {
-    db.prepare("UPDATE tasks SET result = ? WHERE id = ?").run(result, taskId);
-  }
+  })();
 
   // Auto-complete own-department subtasks on CLI success; foreign ones get delegated
   if (exitCode === 0) {
@@ -909,7 +924,7 @@ function handleTaskRunComplete(taskId: string, exitCode: number): void {
     }
 
     // Schedule team leader review message (2-3s delay)
-    setTimeout(() => {
+    setTimeout(async () => {
       if (!task) return;
       const leader = findTeamLeader(task.department_id);
       if (!leader) {
@@ -920,15 +935,13 @@ function handleTaskRunComplete(taskId: string, exitCode: number): void {
 
       // Read the task result and pretty-parse it for the report
       let reportBody = "";
-      try {
-        const logFile = path.join(logsDir, `${taskId}.log`);
-        if (fs.existsSync(logFile)) {
-          const raw = fs.readFileSync(logFile, "utf8");
-          const pretty = prettyStreamJson(raw);
-          // Take the last ~500 chars of the pretty output as summary
-          reportBody = pretty.length > 500 ? "..." + pretty.slice(-500) : pretty;
-        }
-      } catch { /* ignore */ }
+      const logFile = path.join(logsDir, `${taskId}.log`);
+      const raw = await readUtf8Tail(logFile, 256 * 1024);
+      if (raw) {
+        const pretty = prettyStreamJson(raw);
+        // Take the last ~500 chars of the pretty output as summary
+        reportBody = pretty.length > 500 ? "..." + pretty.slice(-500) : pretty;
+      }
 
       // If worktree exists, include diff summary in the report
       const wtInfo = taskWorktrees.get(taskId);
@@ -1010,17 +1023,15 @@ function handleTaskRunComplete(taskId: string, exitCode: number): void {
     if (task) {
       const leader = findTeamLeader(task.department_id);
       if (leader) {
-        setTimeout(() => {
+        setTimeout(async () => {
           // Read error output for failure report
           let errorBody = "";
-          try {
-            const logFile = path.join(logsDir, `${taskId}.log`);
-            if (fs.existsSync(logFile)) {
-              const raw = fs.readFileSync(logFile, "utf8");
-              const pretty = prettyStreamJson(raw);
-              errorBody = pretty.length > 300 ? "..." + pretty.slice(-300) : pretty;
-            }
-          } catch { /* ignore */ }
+          const logFile = path.join(logsDir, `${taskId}.log`);
+          const raw = await readUtf8Tail(logFile, 256 * 1024);
+          if (raw) {
+            const pretty = prettyStreamJson(raw);
+            errorBody = pretty.length > 300 ? "..." + pretty.slice(-300) : pretty;
+          }
 
           const failLang = resolveLang(task.description ?? task.title);
           const failContent = errorBody

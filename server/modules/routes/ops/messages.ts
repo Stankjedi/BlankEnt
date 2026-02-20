@@ -846,13 +846,11 @@ app.delete("/api/messages", (req, res) => {
   }
 
   if (agentId) {
-    // Delete messages for a specific agent conversation + announcements shown in that chat
+    // Delete only direct conversation messages for a specific agent.
     const result = db.prepare(
       `DELETE FROM messages WHERE
         (sender_type = 'ceo' AND receiver_type = 'agent' AND receiver_id = ?)
-        OR (sender_type = 'agent' AND sender_id = ?)
-        OR receiver_type = 'all'
-        OR message_type = 'announcement'`
+        OR (sender_type = 'agent' AND sender_id = ?)`
     ).run(agentId, agentId);
     broadcast("messages_cleared", { scope: "agent", agent_id: agentId });
     return res.json({ ok: true, deleted: result.changes });

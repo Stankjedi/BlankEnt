@@ -1,6 +1,14 @@
 // @ts-nocheck
 
+let lifecycleBootstrapped = false;
+
 export function startLifecycle(ctx: any): void {
+  if (lifecycleBootstrapped) {
+    console.warn("[Claw-Empire] startLifecycle called more than once; skipping duplicate bootstrap");
+    return;
+  }
+  lifecycleBootstrapped = true;
+
   const {
     HOST,
     IN_PROGRESS_ORPHAN_GRACE_MS,
@@ -257,7 +265,7 @@ function recoverInterruptedWorkflowOnStartup(): void {
     console.error("[Claw-Empire] startup reconciliation failed:", err);
   }
 
-  recoverOrphanInProgressTasks("startup");
+  runRecoverOrphanInProgressTasks("startup");
 
   const reviewTasks = db.prepare(`
     SELECT id, title
@@ -292,6 +300,73 @@ function sweepPendingSubtaskDelegations(): void {
   for (const row of parents) {
     if (!row.id) continue;
     processSubtaskDelegations(row.id);
+  }
+}
+
+let rotateBreaksInFlight = false;
+function runRotateBreaks(): void {
+  if (rotateBreaksInFlight) return;
+  rotateBreaksInFlight = true;
+  try {
+    rotateBreaks();
+  } finally {
+    rotateBreaksInFlight = false;
+  }
+}
+
+let orphanRecoveryInFlight = false;
+function runRecoverOrphanInProgressTasks(reason: InProgressRecoveryReason): void {
+  if (orphanRecoveryInFlight) return;
+  orphanRecoveryInFlight = true;
+  try {
+    recoverOrphanInProgressTasks(reason);
+  } finally {
+    orphanRecoveryInFlight = false;
+  }
+}
+
+let pendingDelegationSweepInFlight = false;
+function runPendingSubtaskDelegationSweep(): void {
+  if (pendingDelegationSweepInFlight) return;
+  pendingDelegationSweepInFlight = true;
+  try {
+    sweepPendingSubtaskDelegations();
+  } finally {
+    pendingDelegationSweepInFlight = false;
+  }
+}
+
+let startupRecoveryInFlight = false;
+function runStartupRecovery(): void {
+  if (startupRecoveryInFlight) return;
+  startupRecoveryInFlight = true;
+  try {
+    recoverInterruptedWorkflowOnStartup();
+  } finally {
+    startupRecoveryInFlight = false;
+  }
+}
+
+let tokenRefreshInFlight = false;
+async function runBackgroundTokenRefresh(): Promise<void> {
+  if (tokenRefreshInFlight) return;
+  tokenRefreshInFlight = true;
+  try {
+    const cred = getDecryptedOAuthToken("google_antigravity");
+    if (!cred || !cred.refreshToken) return;
+    const expiresAtMs = cred.expiresAt && cred.expiresAt < 1e12
+      ? cred.expiresAt * 1000
+      : cred.expiresAt;
+    if (!expiresAtMs) return;
+    // Refresh if expiring within 5 minutes
+    if (expiresAtMs < Date.now() + 5 * 60_000) {
+      await refreshGoogleToken(cred);
+      console.log("[oauth] Background refresh: Antigravity token renewed");
+    }
+  } catch (err) {
+    console.error("[oauth] Background refresh failed:", err instanceof Error ? err.message : err);
+  } finally {
+    tokenRefreshInFlight = false;
   }
 }
 
@@ -339,12 +414,12 @@ async function autoAssignAgentProviders(): Promise<void> {
 }
 
 // Run rotation every 60 seconds, and once on startup after 5s
-setTimeout(rotateBreaks, 5_000);
-setInterval(rotateBreaks, 60_000);
-setTimeout(recoverInterruptedWorkflowOnStartup, 3_000);
-setInterval(() => recoverOrphanInProgressTasks("interval"), IN_PROGRESS_ORPHAN_SWEEP_MS);
-setTimeout(sweepPendingSubtaskDelegations, 4_000);
-setInterval(sweepPendingSubtaskDelegations, SUBTASK_DELEGATION_SWEEP_MS);
+setTimeout(runRotateBreaks, 5_000);
+setInterval(runRotateBreaks, 60_000);
+setTimeout(runStartupRecovery, 3_000);
+setInterval(() => runRecoverOrphanInProgressTasks("interval"), IN_PROGRESS_ORPHAN_SWEEP_MS);
+setTimeout(runPendingSubtaskDelegationSweep, 4_000);
+setInterval(runPendingSubtaskDelegationSweep, SUBTASK_DELEGATION_SWEEP_MS);
 setTimeout(autoAssignAgentProviders, 4_000);
 
 // ---------------------------------------------------------------------------
@@ -361,21 +436,7 @@ const server = app.listen(PORT, HOST, () => {
 
 // Background token refresh: check every 5 minutes for tokens expiring within 5 minutes
 setInterval(async () => {
-  try {
-    const cred = getDecryptedOAuthToken("google_antigravity");
-    if (!cred || !cred.refreshToken) return;
-    const expiresAtMs = cred.expiresAt && cred.expiresAt < 1e12
-      ? cred.expiresAt * 1000
-      : cred.expiresAt;
-    if (!expiresAtMs) return;
-    // Refresh if expiring within 5 minutes
-    if (expiresAtMs < Date.now() + 5 * 60_000) {
-      await refreshGoogleToken(cred);
-      console.log("[oauth] Background refresh: Antigravity token renewed");
-    }
-  } catch (err) {
-    console.error("[oauth] Background refresh failed:", err instanceof Error ? err.message : err);
-  }
+  await runBackgroundTokenRefresh();
 }, 5 * 60 * 1000);
 
 // WebSocket server on same HTTP server

@@ -423,10 +423,29 @@ function prettyStreamJson(raw: string): string {
   return normalized;
 }
 
+async function readUtf8Tail(filePath: string, maxBytes: number): Promise<string> {
+  try {
+    const stat = await fs.promises.stat(filePath);
+    if (!stat.isFile() || stat.size <= 0) return "";
+    const readSize = Math.min(stat.size, Math.max(1, maxBytes));
+    const start = stat.size - readSize;
+    const handle = await fs.promises.open(filePath, "r");
+    try {
+      const buffer = Buffer.alloc(readSize);
+      await handle.read(buffer, 0, readSize, start);
+      return buffer.toString("utf8");
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return "";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Task terminal log viewer (ported from claw-kanban)
 // ---------------------------------------------------------------------------
-app.get("/api/tasks/:id/terminal", (req, res) => {
+app.get("/api/tasks/:id/terminal", async (req, res) => {
   const id = String(req.params.id);
   const lines = Math.min(Math.max(Number(req.query.lines ?? 200), 20), 4000);
   const pretty = String(req.query.pretty ?? "0") === "1";
@@ -436,8 +455,10 @@ app.get("/api/tasks/:id/terminal", (req, res) => {
     return res.json({ ok: true, exists: false, path: filePath, text: "" });
   }
 
-  const raw = fs.readFileSync(filePath, "utf8");
-  const parts = raw.split(/\r?\n/);
+  const logTailBudget = Math.max(64 * 1024, Math.min(2 * 1024 * 1024, lines * 400));
+  const rawTail = await readUtf8Tail(filePath, logTailBudget);
+
+  const parts = rawTail.split(/\r?\n/);
   const tail = parts.slice(Math.max(0, parts.length - lines)).join("\n");
   let text = tail;
   if (pretty) {
@@ -2100,7 +2121,7 @@ app.get("/api/skills/learn/:jobId", (req, res) => {
 // ---------------------------------------------------------------------------
 
 // GET /api/tasks/:id/diff — Get diff for review in UI
-app.get("/api/tasks/:id/diff", (req, res) => {
+app.get("/api/tasks/:id/diff", async (req, res) => {
   const id = String(req.params.id);
   const wtInfo = taskWorktrees.get(id);
   if (!wtInfo) {
@@ -2108,17 +2129,23 @@ app.get("/api/tasks/:id/diff", (req, res) => {
   }
 
   try {
-    const currentBranch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
-      cwd: wtInfo.projectPath, stdio: "pipe", timeout: 5000,
-    }).toString().trim();
+    const currentBranch = await execWithTimeout(
+      "git",
+      ["-C", wtInfo.projectPath, "rev-parse", "--abbrev-ref", "HEAD"],
+      5000,
+    );
 
-    const stat = execFileSync("git", ["diff", `${currentBranch}...${wtInfo.branchName}`, "--stat"], {
-      cwd: wtInfo.projectPath, stdio: "pipe", timeout: 10000,
-    }).toString().trim();
+    const stat = await execWithTimeout(
+      "git",
+      ["-C", wtInfo.projectPath, "diff", `${currentBranch}...${wtInfo.branchName}`, "--stat"],
+      10000,
+    );
 
-    const diff = execFileSync("git", ["diff", `${currentBranch}...${wtInfo.branchName}`], {
-      cwd: wtInfo.projectPath, stdio: "pipe", timeout: 15000,
-    }).toString();
+    const diff = await execWithTimeout(
+      "git",
+      ["-C", wtInfo.projectPath, "diff", "--no-color", `${currentBranch}...${wtInfo.branchName}`],
+      15000,
+    );
 
     res.json({
       ok: true,

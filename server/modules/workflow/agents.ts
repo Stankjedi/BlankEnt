@@ -859,6 +859,42 @@ function seedReviewRevisionSubtasks(taskId: string, ownerDeptId: string | null, 
 
 // Codex multi-agent: map thread_id → cli_tool_use_id (item.id from spawn_agent)
 const codexThreadToSubtask = new Map<string, string>();
+const SUBTASK_PARSE_BATCH_MS = 120;
+const SUBTASK_PARSE_MAX_BUFFER_CHARS = 256 * 1024;
+const pendingSubtaskParseByTask = new Map<string, string>();
+const pendingSubtaskParseTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function flushPendingSubtaskParse(taskId: string): void {
+  const buffered = pendingSubtaskParseByTask.get(taskId);
+  if (!buffered) return;
+  pendingSubtaskParseByTask.delete(taskId);
+  parseAndCreateSubtasks(taskId, buffered);
+}
+
+function clearPendingSubtaskParse(taskId: string): void {
+  pendingSubtaskParseByTask.delete(taskId);
+  const timer = pendingSubtaskParseTimers.get(taskId);
+  if (timer) {
+    clearTimeout(timer);
+    pendingSubtaskParseTimers.delete(taskId);
+  }
+}
+
+function queueSubtaskParse(taskId: string, data: string): void {
+  if (!data) return;
+  const previous = pendingSubtaskParseByTask.get(taskId) ?? "";
+  const merged = previous ? `${previous}\n${data}` : data;
+  const bounded = merged.length > SUBTASK_PARSE_MAX_BUFFER_CHARS
+    ? merged.slice(-SUBTASK_PARSE_MAX_BUFFER_CHARS)
+    : merged;
+  pendingSubtaskParseByTask.set(taskId, bounded);
+  if (pendingSubtaskParseTimers.has(taskId)) return;
+  const timer = setTimeout(() => {
+    pendingSubtaskParseTimers.delete(taskId);
+    flushPendingSubtaskParse(taskId);
+  }, SUBTASK_PARSE_BATCH_MS);
+  pendingSubtaskParseTimers.set(taskId, timer);
+}
 
 function parseAndCreateSubtasks(taskId: string, data: string): void {
   try {
@@ -1012,6 +1048,7 @@ function spawnCliAgent(
   reasoningLevel?: string,
 ): ChildProcess {
   clearCliOutputDedup(taskId);
+  clearPendingSubtaskParse(taskId);
   // Save prompt for debugging
   const promptPath = path.join(logsDir, `${taskId}.prompt.txt`);
   fs.writeFileSync(promptPath, prompt, "utf8");
@@ -1101,6 +1138,8 @@ function spawnCliAgent(
     finished = true;
     clearRunTimers();
     detachOutputListeners();
+    flushPendingSubtaskParse(taskId);
+    clearPendingSubtaskParse(taskId);
     console.error(`[Claw-Empire] spawn error for ${provider} (task ${taskId}): ${err.message}`);
     safeWrite(`\n[Claw-Empire] SPAWN ERROR: ${err.message}\n`);
     safeEnd();
@@ -1120,7 +1159,7 @@ function spawnCliAgent(
     if (shouldSkipDuplicateCliOutput(taskId, "stdout", text)) return;
     safeWrite(text);
     broadcast("cli_output", { task_id: taskId, stream: "stdout", data: text });
-    parseAndCreateSubtasks(taskId, text);
+    queueSubtaskParse(taskId, text);
   };
   stderrListener = (chunk: Buffer) => {
     touchIdleTimer();
@@ -1137,6 +1176,8 @@ function spawnCliAgent(
     finished = true;
     clearRunTimers();
     detachOutputListeners();
+    flushPendingSubtaskParse(taskId);
+    clearPendingSubtaskParse(taskId);
     safeEnd();
     try { fs.unlinkSync(promptPath); } catch { /* ignore */ }
   });

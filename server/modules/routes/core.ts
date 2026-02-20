@@ -218,6 +218,16 @@ app.get("/health", (_req, res) => res.json(buildHealthPayload()));
 app.get("/healthz", (_req, res) => res.json(buildHealthPayload()));
 app.get("/api/health", (_req, res) => res.json(buildHealthPayload()));
 
+const TASK_LIST_RECONCILE_MIN_INTERVAL_MS = 2000;
+let lastTaskListReconcileAt = 0;
+
+function reconcileTaskListIfDue(): void {
+  const now = nowMs();
+  if (now - lastTaskListReconcileAt < TASK_LIST_RECONCILE_MIN_INTERVAL_MS) return;
+  lastTaskListReconcileAt = now;
+  reconcileCrossDeptSubtasks();
+}
+
 // ---------------------------------------------------------------------------
 // Gateway Channel Messaging
 // ---------------------------------------------------------------------------
@@ -542,7 +552,7 @@ app.post("/api/agents/:id/spawn", (req, res) => {
 // Tasks
 // ---------------------------------------------------------------------------
 app.get("/api/tasks", (req, res) => {
-  reconcileCrossDeptSubtasks();
+  reconcileTaskListIfDue();
   const statusFilter = firstQueryValue(req.query.status);
   const deptFilter = firstQueryValue(req.query.department_id);
   const agentFilter = firstQueryValue(req.query.agent_id);
@@ -564,47 +574,41 @@ app.get("/api/tasks", (req, res) => {
   }
 
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-  const subtaskTotalExpr = `(
-    (SELECT COUNT(*) FROM subtasks s WHERE s.task_id = t.id)
-    +
-    (SELECT COUNT(*)
-     FROM tasks c
-     WHERE c.source_task_id = t.id
-       AND NOT EXISTS (
-         SELECT 1
-         FROM subtasks s2
-         WHERE s2.task_id = t.id
-           AND s2.delegated_task_id = c.id
-       )
-    )
-  )`;
-  const subtaskDoneExpr = `(
-    (SELECT COUNT(*) FROM subtasks s WHERE s.task_id = t.id AND s.status = 'done')
-    +
-    (SELECT COUNT(*)
-     FROM tasks c
-     WHERE c.source_task_id = t.id
-       AND c.status = 'done'
-       AND NOT EXISTS (
-         SELECT 1
-         FROM subtasks s2
-         WHERE s2.task_id = t.id
-           AND s2.delegated_task_id = c.id
-       )
-    )
-  )`;
 
   const tasks = db.prepare(`
+    WITH subtask_counts AS (
+      SELECT
+        s.task_id,
+        COUNT(*) AS direct_total,
+        SUM(CASE WHEN s.status = 'done' THEN 1 ELSE 0 END) AS direct_done
+      FROM subtasks s
+      GROUP BY s.task_id
+    ),
+    delegated_counts AS (
+      SELECT
+        c.source_task_id AS task_id,
+        COUNT(*) AS delegated_total,
+        SUM(CASE WHEN c.status = 'done' THEN 1 ELSE 0 END) AS delegated_done
+      FROM tasks c
+      LEFT JOIN subtasks s2
+        ON s2.task_id = c.source_task_id
+       AND s2.delegated_task_id = c.id
+      WHERE c.source_task_id IS NOT NULL
+        AND s2.id IS NULL
+      GROUP BY c.source_task_id
+    )
     SELECT t.*,
       a.name AS agent_name,
       a.avatar_emoji AS agent_avatar,
       d.name AS department_name,
       d.icon AS department_icon,
-      ${subtaskTotalExpr} AS subtask_total,
-      ${subtaskDoneExpr} AS subtask_done
+      (COALESCE(sc.direct_total, 0) + COALESCE(dc.delegated_total, 0)) AS subtask_total,
+      (COALESCE(sc.direct_done, 0) + COALESCE(dc.delegated_done, 0)) AS subtask_done
     FROM tasks t
     LEFT JOIN agents a ON t.assigned_agent_id = a.id
     LEFT JOIN departments d ON t.department_id = d.id
+    LEFT JOIN subtask_counts sc ON sc.task_id = t.id
+    LEFT JOIN delegated_counts dc ON dc.task_id = t.id
     ${where}
     ORDER BY t.priority DESC, t.updated_at DESC
   `).all(...(params as SQLInputValue[]));

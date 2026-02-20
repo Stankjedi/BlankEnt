@@ -258,10 +258,29 @@ function computeAuditChainHash(
   return hasher.digest("hex");
 }
 
+function readUtf8TailSync(filePath: string, maxBytes = 256 * 1024): string {
+  try {
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile() || stat.size <= 0) return "";
+    const readSize = Math.min(stat.size, Math.max(1, maxBytes));
+    const start = stat.size - readSize;
+    const buffer = Buffer.alloc(readSize);
+    const fd = fs.openSync(filePath, "r");
+    try {
+      fs.readSync(fd, buffer, 0, readSize, start);
+    } finally {
+      fs.closeSync(fd);
+    }
+    return buffer.toString("utf8");
+  } catch {
+    return "";
+  }
+}
+
 function loadSecurityAuditPrevHash(): string {
   try {
     if (!fs.existsSync(securityAuditLogPath)) return "GENESIS";
-    const raw = fs.readFileSync(securityAuditLogPath, "utf8").trim();
+    const raw = readUtf8TailSync(securityAuditLogPath, 512 * 1024).trim();
     if (!raw) return "GENESIS";
     const lines = raw.split(/\r?\n/);
     for (let idx = lines.length - 1; idx >= 0; idx -= 1) {
@@ -1059,6 +1078,18 @@ try { db.exec("ALTER TABLE subtasks ADD COLUMN delegated_task_id TEXT"); } catch
 // Cross-department collaboration: link collaboration task back to original task
 try { db.exec("ALTER TABLE tasks ADD COLUMN source_task_id TEXT"); } catch { /* already exists */ }
 
+function runStartupMigrationOnce(key: string, fn: () => void): void {
+  const markerKey = `schema_migration.${key}`;
+  const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(markerKey) as { value?: string } | undefined;
+  if ((row?.value ?? "") === "1") return;
+  fn();
+  db.prepare(`
+    INSERT INTO settings (key, value)
+    VALUES (?, '1')
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `).run(markerKey);
+}
+
 // Migrate messages CHECK constraint to include 'directive'
 function migrateMessagesDirectiveType(): void {
   const row = db.prepare(`
@@ -1110,7 +1141,7 @@ function migrateMessagesDirectiveType(): void {
   // Recreate index
   db.exec("CREATE INDEX IF NOT EXISTS idx_messages_receiver ON messages(receiver_type, receiver_id, created_at DESC)");
 }
-migrateMessagesDirectiveType();
+runStartupMigrationOnce("messages_directive_type_v1", migrateMessagesDirectiveType);
 
 function migrateLegacyTasksStatusSchema(): void {
   const row = db.prepare(`
@@ -1185,7 +1216,7 @@ function migrateLegacyTasksStatusSchema(): void {
     db.exec("PRAGMA foreign_keys = ON");
   }
 }
-migrateLegacyTasksStatusSchema();
+runStartupMigrationOnce("legacy_tasks_status_schema_v1", migrateLegacyTasksStatusSchema);
 
 function repairLegacyTaskForeignKeys(): void {
   const refCount = (db.prepare(`
@@ -1351,7 +1382,7 @@ function repairLegacyTaskForeignKeys(): void {
     db.exec("PRAGMA foreign_keys = ON");
   }
 }
-repairLegacyTaskForeignKeys();
+runStartupMigrationOnce("repair_legacy_task_foreign_keys_v1", repairLegacyTaskForeignKeys);
 
 function ensureMessagesIdempotencySchema(): void {
   try { db.exec("ALTER TABLE messages ADD COLUMN idempotency_key TEXT"); } catch { /* already exists */ }
@@ -1394,7 +1425,16 @@ function ensureMessagesIdempotencySchema(): void {
     WHERE idempotency_key IS NOT NULL
   `);
 }
-ensureMessagesIdempotencySchema();
+runStartupMigrationOnce("messages_idempotency_schema_v1", ensureMessagesIdempotencySchema);
+
+function ensurePerformanceIndexes(): void {
+  db.exec("CREATE INDEX IF NOT EXISTS idx_subtasks_task_status ON subtasks(task_id, status)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_subtasks_task_delegated ON subtasks(task_id, delegated_task_id)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_source_status ON tasks(source_task_id, status, updated_at DESC)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_messages_sender_receiver ON messages(sender_type, sender_id, receiver_type, receiver_id, created_at DESC)");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_messages_type_receiver ON messages(message_type, receiver_type, receiver_id, created_at DESC)");
+}
+ensurePerformanceIndexes();
 
 // ---------------------------------------------------------------------------
 // Seed default data
